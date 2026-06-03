@@ -5,4 +5,4 @@ RUN go mod download
 COPY . .
 RUN go install gotest.tools/gotestsum@v1.12.3
 RUN CGO_ENABLED=0 go build -o /app/build/testapp ./e2e/testapp
-CMD ["gotestsum", "--format", "testname", "--junitfile", "/app/test-results/standard-junit.xml", "--", "-tags", "e2e", "./e2e", "-v", "-timeout", "300s", "-skip", "^(TestRegisterStartupVersion|TestStartupFromExistingOracleState)$"]
+CMD ["gotestsum", "--format", "testname", "--junitfile", "/app/test-results/run-junit.xml", "--", "-tags", "e2e", "./e2e", "-v", "-timeout", "300s", "-skip", "^(TestRegisterStartupVersion|TestStartupFromExistingOracleState)$"]
