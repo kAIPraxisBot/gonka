@@ -8,10 +8,12 @@ import (
 	"decentralized-api/internal"
 	"decentralized-api/internal/authzcache"
 	"decentralized-api/internal/server/middleware"
+	"decentralized-api/observability"
 	"decentralized-api/payloadstorage"
 	"decentralized-api/poc/artifacts"
 	"decentralized-api/statsstorage"
 	"devshard"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -158,6 +160,27 @@ func NewServer(
 	// PoC artifact state endpoint (for testermint/validators to get real count and root_hash)
 	g.GET("poc/artifacts/state", s.getPocArtifactsState)
 
+	// Public mlnode metrics federation: one endpoint that merges the Prometheus
+	// metrics of every mlnode this participant runs, each series labelled with
+	// its mlnode id (plus mlnode_up per node). The mlnodes stay private — only
+	// this api reaches them. Cached (10s) so public scrapes don't hammer the
+	// mlnodes, and IP rate limited. Reachable publicly at /v1/mlnodes/metrics
+	// via nginx's existing /v1/ proxy.
+	mlnodeMetricsRateLimiter := echomw.RateLimiter(echomw.NewRateLimiterMemoryStoreWithConfig(
+		echomw.RateLimiterMemoryStoreConfig{
+			Rate:      60.0 / 60.0, // 60 requests per minute per IP
+			Burst:     10,
+			ExpiresIn: 3 * time.Minute,
+		},
+	))
+	g.GET("mlnodes/metrics",
+		echo.WrapHandler(observability.MLNodeMetricsHandler(s.mlNodeMetricsTargets, observability.MLNodeMetricsConfig{
+			CacheTTL:      10 * time.Second,
+			ScrapeTimeout: 3 * time.Second,
+		})),
+		mlnodeMetricsRateLimiter,
+	)
+
 	v2 := e.Group("/v2/")
 	v2.GET("participants/:address", s.getParticipantByAddress)
 	v2.GET("accounts/:address", s.getAccountByAddress)
@@ -178,4 +201,22 @@ func (s *Server) getStatus(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, struct {
 		Status string `json:"status"`
 	}{Status: "ok"})
+}
+
+// mlNodeMetricsTargets snapshots the participant's current mlnodes and where to
+// scrape each one's Prometheus metrics. vLLM-style mlnodes expose /metrics on
+// their inference port; adjust here if a deployment serves it elsewhere.
+func (s *Server) mlNodeMetricsTargets() ([]observability.MLNodeTarget, error) {
+	nodes, err := s.nodeBroker.GetNodes()
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]observability.MLNodeTarget, 0, len(nodes))
+	for _, n := range nodes {
+		targets = append(targets, observability.MLNodeTarget{
+			ID:  n.Node.Id,
+			URL: fmt.Sprintf("http://%s:%d/metrics", n.Node.Host, n.Node.InferencePort),
+		})
+	}
+	return targets, nil
 }
