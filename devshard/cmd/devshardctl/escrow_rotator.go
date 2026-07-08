@@ -17,6 +17,12 @@ const (
 	rotationRoleTemp    = "temp"
 
 	defaultEscrowRotationInterval = 15 * time.Second
+
+	// rotationCreateRetryCooldown bounds how long a failed escrow-create stays
+	// suppressed. TTL-based (not epoch-scoped) so a transient RPC failure (e.g. a
+	// 503) can't turn into a whole-epoch "no routable capacity" outage, while
+	// still preventing a tight per-tick retry storm against a struggling RPC.
+	rotationCreateRetryCooldown = 60 * time.Second
 )
 
 var (
@@ -357,20 +363,37 @@ func (g *Gateway) rotationFailureKey(modelID, role string, epoch uint64) string 
 	return fmt.Sprintf("%s|%s|%d", strings.TrimSpace(modelID), role, epoch)
 }
 
+// rotationNow returns the current time through an injectable clock (real time in
+// production; a controllable clock in tests).
+func (g *Gateway) rotationNow() time.Time {
+	if g.rotationClock != nil {
+		return g.rotationClock()
+	}
+	return time.Now()
+}
+
 func (g *Gateway) recordRotationCreateFailure(modelID, role string, epoch uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.rotationFailures == nil {
-		g.rotationFailures = make(map[string]struct{})
+		g.rotationFailures = make(map[string]time.Time)
 	}
-	g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)] = struct{}{}
+	g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)] = g.rotationNow()
 }
 
+// rotationCreateFailed reports whether escrow creation for this model|role|epoch
+// failed recently and is still within the retry cooldown. The latch is TTL-based,
+// not epoch-scoped: after rotationCreateRetryCooldown elapses, rotation retries
+// within the SAME epoch, so a brief RPC blip no longer suppresses (re)creation
+// until the epoch boundary.
 func (g *Gateway) rotationCreateFailed(modelID, role string, epoch uint64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	_, ok := g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)]
-	return ok
+	failedAt, ok := g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)]
+	if !ok {
+		return false
+	}
+	return g.rotationNow().Sub(failedAt) < rotationCreateRetryCooldown
 }
 
 func (g *Gateway) settleDevshardOnChain(ctx context.Context, id string, req adminSettleEscrowRequest) (*SettleDevshardEscrowResult, error) {

@@ -55,7 +55,8 @@ type Gateway struct {
 	baseStorageDir        string
 	rotatorStop           chan struct{}
 	rotatorDone           chan struct{}
-	rotationFailures      map[string]struct{}
+	rotationFailures      map[string]time.Time
+	rotationClock         func() time.Time
 	finalizeMu            sync.Mutex
 	settlementMu          sync.Mutex
 	settlementInFlight    map[string]struct{}
@@ -457,7 +458,7 @@ func NewGateway(runtimes []*devshardRuntime, limiter *GatewayLimiter, defaultMod
 		settings: GatewaySettings{
 			DefaultModel: defaultModel,
 		},
-		rotationFailures:   make(map[string]struct{}),
+		rotationFailures:   make(map[string]time.Time),
 		settlementInFlight: make(map[string]struct{}),
 	}
 	g.participantLimiter.SetMetrics(g.metrics)
