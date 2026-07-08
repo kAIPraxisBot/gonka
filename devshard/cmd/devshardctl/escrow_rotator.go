@@ -17,6 +17,14 @@ const (
 	rotationRoleTemp    = "temp"
 
 	defaultEscrowRotationInterval = 15 * time.Second
+
+	// rotationCreateFailureCooldown bounds how long a single failed create
+	// attempt suppresses further attempts for the same model/role/epoch.
+	// Without this, a single transient error (e.g. an RPC 503 during tx
+	// broadcast) got cached for the rest of the epoch, permanently stalling
+	// automatic rotation until an operator manually created escrows via the
+	// admin API. Retrying periodically lets transient failures self-heal.
+	rotationCreateFailureCooldown = 60 * time.Second
 )
 
 var (
@@ -361,16 +369,34 @@ func (g *Gateway) recordRotationCreateFailure(modelID, role string, epoch uint64
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.rotationFailures == nil {
-		g.rotationFailures = make(map[string]struct{})
+		g.rotationFailures = make(map[string]time.Time)
 	}
-	g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)] = struct{}{}
+	g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)] = time.Now()
 }
 
 func (g *Gateway) rotationCreateFailed(modelID, role string, epoch uint64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	_, ok := g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)]
-	return ok
+	failedAt, ok := g.rotationFailures[g.rotationFailureKey(modelID, role, epoch)]
+	if !ok {
+		return false
+	}
+	if time.Since(failedAt) >= rotationCreateFailureCooldown {
+		delete(g.rotationFailures, g.rotationFailureKey(modelID, role, epoch))
+		return false
+	}
+	return true
+}
+
+// resetRotationCreateFailures clears cached rotation-create failures so the
+// next tick retries immediately instead of waiting out the cooldown. Returns
+// the number of entries cleared.
+func (g *Gateway) resetRotationCreateFailures() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := len(g.rotationFailures)
+	g.rotationFailures = make(map[string]time.Time)
+	return n
 }
 
 func (g *Gateway) settleDevshardOnChain(ctx context.Context, id string, req adminSettleEscrowRequest) (*SettleDevshardEscrowResult, error) {

@@ -55,7 +55,7 @@ type Gateway struct {
 	baseStorageDir        string
 	rotatorStop           chan struct{}
 	rotatorDone           chan struct{}
-	rotationFailures      map[string]struct{}
+	rotationFailures      map[string]time.Time
 	finalizeMu            sync.Mutex
 	settlementMu          sync.Mutex
 	settlementInFlight    map[string]struct{}
@@ -457,7 +457,7 @@ func NewGateway(runtimes []*devshardRuntime, limiter *GatewayLimiter, defaultMod
 		settings: GatewaySettings{
 			DefaultModel: defaultModel,
 		},
-		rotationFailures:   make(map[string]struct{}),
+		rotationFailures:   make(map[string]time.Time),
 		settlementInFlight: make(map[string]struct{}),
 	}
 	g.participantLimiter.SetMetrics(g.metrics)
@@ -999,6 +999,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/devshards/", g.handleAdminDevshardAction)
 	mux.HandleFunc("/v1/admin/escrows", g.handleAdminEscrows)
 	mux.HandleFunc("/v1/admin/participants/unquarantine", g.handleAdminUnquarantine)
+	mux.HandleFunc("/v1/admin/escrow-rotation/reset-failures", g.handleAdminResetRotationFailures)
 	mux.HandleFunc("/v1/debug/rotation", g.handleDebugRotation)
 	mux.HandleFunc("/v1/finalize", g.handleSingleOnly)
 	mux.HandleFunc("/v1/state", g.handleSingleOnly)
@@ -3128,6 +3129,17 @@ func (g *Gateway) handleAdminUnquarantine(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{
 		"participant_key": req.ParticipantKey,
 		"cleared":         cleared,
+	})
+}
+
+func (g *Gateway) handleAdminResetRotationFailures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cleared := g.resetRotationCreateFailures()
+	writeJSON(w, map[string]any{
+		"cleared": cleared,
 	})
 }
 
