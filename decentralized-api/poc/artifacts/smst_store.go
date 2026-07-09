@@ -18,6 +18,12 @@ import (
 const (
 	// MaxLeafCount caps artifacts to prevent overflow in size calculations.
 	MaxLeafCount = (1 << 30) - 1 // 1,073,741,823
+
+	// retainedSnapshotWindow bounds how many recent flush snapshots are kept
+	// for O(depth) proof serving. Counts outside the window (and any non-flush
+	// count) fall back to an O(N) rebuild, so this only bounds memory and never
+	// affects correctness.
+	retainedSnapshotWindow = 32
 )
 
 var (
@@ -58,6 +64,12 @@ type SMSTArtifactStore struct {
 	flushedDataOffset uint64
 	flushedRoots      map[uint32][]byte
 
+	// retained holds copy-on-write snapshots captured at flush boundaries, so a
+	// proof at a committed count is served from shared nodes instead of an O(N)
+	// rebuild. Bounded by retainedSnapshotWindow; misses fall back to rebuild.
+	retained      map[uint32]smstSnapshot
+	retainedOrder []uint32
+
 	nodeCounts        map[string]uint32
 	flushedNodeCounts map[string]uint32
 
@@ -96,6 +108,7 @@ func OpenSMST(dir string) (*SMSTArtifactStore, error) {
 		nonceToOffset:       make(map[int32]uint64),
 		smst:                NewSMST(smstDefaultDepth),
 		flushedRoots:        make(map[uint32][]byte),
+		retained:            make(map[uint32]smstSnapshot),
 		nodeCounts:          make(map[string]uint32),
 		flushedNodeCounts:   make(map[string]uint32),
 		distributionHistory: make(map[uint32]map[string]uint32),
@@ -157,6 +170,7 @@ func (s *SMSTArtifactStore) recover() error {
 
 	rootHash, _ := s.smst.GetRoot()
 	s.flushedRoots[s.flushedLeafCount] = rootHash
+	s.captureRetainedLocked()
 
 	if err := s.recoverDistributionHistory(); err != nil {
 		log.Printf("warning: failed to recover distribution history: %v", err)
@@ -226,7 +240,7 @@ func (s *SMSTArtifactStore) AddWithNode(nonce int32, vector []byte, nodeId strin
 		return ErrCapacityExceeded
 	}
 
-	if _, err := s.smst.Insert(nonce, leafHash); err != nil {
+	if _, err := s.smst.insertCOW(nonce, leafHash); err != nil {
 		return err
 	}
 
@@ -290,6 +304,7 @@ func (s *SMSTArtifactStore) flushLocked() error {
 
 	rootHash, _ := s.smst.GetRoot()
 	s.flushedRoots[s.flushedLeafCount] = rootHash
+	s.captureRetainedLocked()
 
 	if err := s.appendDistributionSnapshot(); err != nil {
 		log.Printf("warning: distribution snapshot failed (will use simulation): %v", err)
@@ -682,6 +697,45 @@ func encodeProofForTransport(proof []smstProofElement) [][]byte {
 		result[i] = encoded
 	}
 	return result
+}
+
+// captureRetainedLocked records a copy-on-write snapshot of the current tree so
+// its root at this count can serve proofs without a rebuild. The write lock must
+// be held. Bounded to the most recent retainedSnapshotWindow counts.
+func (s *SMSTArtifactStore) captureRetainedLocked() {
+	count := s.smst.Count()
+	if count == 0 {
+		return
+	}
+	if _, ok := s.retained[count]; ok {
+		return
+	}
+	s.retained[count] = s.smst.snapshot()
+	s.retainedOrder = append(s.retainedOrder, count)
+
+	if len(s.retainedOrder) > retainedSnapshotWindow {
+		evict := len(s.retainedOrder) - retainedSnapshotWindow
+		for _, c := range s.retainedOrder[:evict] {
+			delete(s.retained, c)
+		}
+		s.retainedOrder = append(s.retainedOrder[:0], s.retainedOrder[evict:]...)
+	}
+}
+
+// retainedSnapshotView returns an O(depth) view over a retained snapshot for
+// count, or ok=false when it must be rebuilt.
+func (s *SMSTArtifactStore) retainedSnapshotView(count uint32) (*SMST, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return nil, false
+	}
+	snap, ok := s.retained[count]
+	if !ok {
+		return nil, false
+	}
+	return s.smst.snapshotView(snap), true
 }
 
 func (s *SMSTArtifactStore) snapshotRebuildInputs(count uint32) ([]uint64, []bufferedArtifact, error) {

@@ -185,6 +185,10 @@ func (c *snapshotCache) removeEntryLocked(entry *snapshotCacheEntry) {
 }
 
 func (s *SMSTArtifactStore) buildSnapshotTree(count uint32) (*SMST, error) {
+	if view, ok := s.retainedSnapshotView(count); ok {
+		return view, nil
+	}
+
 	offsets, buffered, err := s.snapshotRebuildInputs(count)
 	if err != nil {
 		return nil, err
