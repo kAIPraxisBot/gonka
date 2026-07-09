@@ -120,6 +120,16 @@ func (s *SMSTArtifactStore) recover() error {
 		return s.recoverDistributionHistory()
 	}
 
+	if treeCacheEnabled() {
+		if s.recoverFromTreeCache(info.Size()) {
+			if err := s.recoverDistributionHistory(); err != nil {
+				log.Printf("warning: failed to recover distribution history: %v", err)
+			}
+			return nil
+		}
+		// Cache miss/stale/inconsistent: fall through to a full replay.
+	}
+
 	if _, err := s.dataFile.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek data file: %w", err)
 	}
@@ -158,11 +168,67 @@ func (s *SMSTArtifactStore) recover() error {
 	rootHash, _ := s.smst.GetRoot()
 	s.flushedRoots[s.flushedLeafCount] = rootHash
 
+	if treeCacheEnabled() && s.flushedLeafCount > 0 {
+		if err := writeTreeCache(s.dir, s.smst, s.flushedDataOffset); err != nil {
+			log.Printf("warning: failed to write SMST tree cache: %v", err)
+		}
+	}
+
 	if err := s.recoverDistributionHistory(); err != nil {
 		log.Printf("warning: failed to recover distribution history: %v", err)
 	}
 
 	return nil
+}
+
+// recoverFromTreeCache returns true only when the sidecar loads AND stays
+// consistent with the log (same end offset, same leaf count, every logged nonce
+// present); any failure leaves store state untouched for a full-replay fallback.
+func (s *SMSTArtifactStore) recoverFromTreeCache(dataSize int64) bool {
+	tree, count, dataOffset, err := loadTreeCache(s.dir)
+	if err != nil {
+		if !errors.Is(err, errTreeCacheMiss) {
+			log.Printf("warning: SMST tree cache unusable, will replay: %v", err)
+		}
+		return false
+	}
+	if int64(dataOffset) != dataSize {
+		log.Printf("info: SMST tree cache stale (cached offset %d != data size %d), replaying", dataOffset, dataSize)
+		return false
+	}
+
+	offsets, nonceToOffset, end, err := scanArtifactOffsets(s.dataFile)
+	if err != nil {
+		log.Printf("warning: SMST offset scan failed, replaying: %v", err)
+		return false
+	}
+	if end != dataOffset || uint32(len(offsets)) != count {
+		log.Printf("info: SMST tree cache inconsistent with log (end=%d cached=%d scanned=%d count=%d), replaying",
+			end, dataOffset, len(offsets), count)
+		return false
+	}
+	for nonce := range nonceToOffset {
+		if !tree.HasNonce(nonce) {
+			log.Printf("info: SMST tree cache missing logged nonce %d, replaying", nonce)
+			return false
+		}
+	}
+	if treeCacheMode() == "shadow" {
+		root, _ := tree.GetRoot()
+		if !bytes.Equal(recomputeTreeRoot(tree), root) {
+			log.Printf("warning: SMST tree cache shadow root recompute mismatch, replaying")
+			return false
+		}
+	}
+
+	s.smst = tree
+	s.offsets = offsets
+	s.nonceToOffset = nonceToOffset
+	s.flushedLeafCount = count
+	s.flushedDataOffset = dataOffset
+	root, _ := tree.GetRoot()
+	s.flushedRoots[count] = root
+	return true
 }
 
 func (s *SMSTArtifactStore) recoverDistributionHistory() error {
@@ -290,6 +356,13 @@ func (s *SMSTArtifactStore) flushLocked() error {
 
 	rootHash, _ := s.smst.GetRoot()
 	s.flushedRoots[s.flushedLeafCount] = rootHash
+
+	// Refresh the cache to match the just-persisted log, riding this flush.
+	if treeCacheEnabled() && s.flushedLeafCount > 0 {
+		if err := writeTreeCache(s.dir, s.smst, s.flushedDataOffset); err != nil {
+			log.Printf("warning: failed to write SMST tree cache: %v", err)
+		}
+	}
 
 	if err := s.appendDistributionSnapshot(); err != nil {
 		log.Printf("warning: distribution snapshot failed (will use simulation): %v", err)
