@@ -50,14 +50,15 @@ func (s *SMST) insertAtCOW(node *smstNode, path []bool, level int, leafHash []by
 	}
 
 	newNode.count = s.nodeCount(newNode.left) + s.nodeCount(newNode.right)
-	newNode.hash = s.computeHash(newNode, level)
-
+	// Hash is deferred: filled lazily by ensureHashed when the root is actually
+	// needed, so shared upper nodes are hashed once per flush, not once per insert.
 	return newNode
 }
 
 // snapshot captures the current tree. O(1): it retains the root pointer and the
 // depth in force at this count, which is the depth a historical proof must use.
 func (s *SMST) snapshot() smstSnapshot {
+	s.ensureHashed()
 	return smstSnapshot{root: s.root, depth: s.depth, count: s.leafCount}
 }
 

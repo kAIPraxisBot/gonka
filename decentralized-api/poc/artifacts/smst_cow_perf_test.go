@@ -79,6 +79,9 @@ func TestCOWSnapshotProofPerf(t *testing.T) {
 			t.Fatalf("rebuild insert: %v", err)
 		}
 	}
+	// Hashing is part of the per-request rebuild cost: a proof needs real sibling
+	// hashes, which deferred hashing fills lazily here rather than on each insert.
+	rebuilt.GetRoot()
 	if _, _, err := rebuilt.GetLeafByDenseIndex(mid / 2); err != nil {
 		t.Fatalf("rebuild serve: %v", err)
 	}

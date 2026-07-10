@@ -104,7 +104,7 @@ func (s *SMST) insertAt(node *smstNode, path []bool, level int, leafHash []byte)
 	}
 
 	node.count = s.nodeCount(node.left) + s.nodeCount(node.right)
-	node.hash = s.computeHash(node, level)
+	node.hash = nil // invalidate; recomputed lazily by ensureHashed
 
 	return node
 }
@@ -134,7 +134,27 @@ func (s *SMST) GetRoot() ([]byte, uint32) {
 	if s.root == nil {
 		return s.emptyHash[s.depth], 0
 	}
+	s.ensureHashed()
 	return s.root.hash, s.root.count
+}
+
+// ensureHashed fills any deferred node hashes (insertCOW sets structure and
+// counts only). Each node is hashed once here rather than on every insert that
+// passes through it, avoiding repeated re-hashing of shared upper nodes.
+// Idempotent: a node with a hash already set stops the recursion.
+func (s *SMST) ensureHashed() {
+	if s.root != nil {
+		s.hashNode(s.root, 0)
+	}
+}
+
+func (s *SMST) hashNode(node *smstNode, level int) {
+	if node == nil || node.hash != nil {
+		return
+	}
+	s.hashNode(node.left, level+1)
+	s.hashNode(node.right, level+1)
+	node.hash = s.computeHash(node, level)
 }
 
 // GetLeafByDenseIndex navigates to a leaf using sum-based dense indexing.
@@ -302,15 +322,12 @@ func (s *SMST) expandDepth(newDepth int) {
 	diff := newDepth - oldDepth
 	for i := 0; i < diff; i++ {
 		if s.root != nil {
-			// This wrapper will be at level (diff - 1 - i) in final tree
-			level := diff - 1 - i
-			siblingHeight := newDepth - level - 1
-			newRoot := &smstNode{
+			// Wrapper hash is deferred; ensureHashed fills it from the wrapped
+			// subtree and the empty sibling (identical to eager computation).
+			s.root = &smstNode{
 				left:  s.root,
 				count: s.root.count,
 			}
-			newRoot.hash = smstHashNode(s.root.hash, s.emptyHash[siblingHeight], newRoot.count)
-			s.root = newRoot
 		}
 	}
 }
