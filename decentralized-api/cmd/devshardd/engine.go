@@ -80,6 +80,10 @@ func (e *devshardEngine) Execute(ctx context.Context, req devshard.ExecuteReques
 
 func (e *devshardEngine) executeMLRequest(ctx context.Context, model string, body []byte) (*http.Response, error) {
 	resp, err := e.doWithLockedNode(ctx, observability.PathExecute, model, func(endpoint string) (*http.Response, error) {
+		// Reject oversized prompts via vLLM /tokenize before they reach the generation queue.
+		if reject := preflightContextCheck(ctx, e.httpClient, endpoint, model, body); reject != nil {
+			return reject, nil
+		}
 		url := endpoint + "/v1/chat/completions"
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if reqErr != nil {
