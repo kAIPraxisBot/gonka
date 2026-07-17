@@ -173,7 +173,9 @@ func TestParticipantLimiterRecordsQuarantineTransitions(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
 	limiter.SetMetrics(m)
 
-	limiter.ObserveResultWithBodyForModel("participant-1", "Qwen/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable, "")
+	for i := 0; i < participantFailureStrikeThreshold; i++ {
+		limiter.ObserveResultWithBodyForModel("participant-1", "Qwen/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable, "")
+	}
 	for i := 0; i < emptyStreamQuarantineThreshold; i++ {
 		limiter.ObserveEmptyStreamForModel("participant-2", "Qwen/Test")
 	}

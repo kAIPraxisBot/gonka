@@ -463,9 +463,11 @@ func TestParticipantLimiterEnforcedUnderCapacityAware(t *testing.T) {
 	setCapacityAwareLimitsForTest(t, true)
 
 	limiter := NewParticipantRequestLimiter(1, 1)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", 503)
+	for i := 0; i < participantFailureStrikeThreshold; i++ {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", 503)
+	}
 
-	// One token is consumed by ObserveResult's 503 backoff; AllowRequest
+	// Repeated 503s trip probe quarantine (tokens zeroed); AllowRequest
 	// should reject the next attempt because we are NOT bypassing.
 	require.Error(t, limiter.AllowRequest("shared-host", "/sessions/12/chat/completions"))
 	require.Error(t, limiter.CanAcceptEscrow([]string{"shared-host"}))

@@ -835,7 +835,9 @@ func TestAdminDeactivateDevshardAllowsActiveRequestsAndStopsNewChat(t *testing.T
 
 func TestAdminDevshardParticipantsShowsQuarantineState(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
-	limiter.ObserveResult("dead-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("dead-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	rt := &devshardRuntime{
 		id:                    "12",
@@ -1559,7 +1561,9 @@ func TestGatewayPooledChatRefreshesCapacityScaleBeforeAcquire(t *testing.T) {
 	require.NoError(t, g.limiter.AcquireForModel("Qwen/Test", 1, 1))
 	require.EqualValues(t, 4, g.limiter.Snapshot().EffectiveMaxConcurrent)
 
-	limiter.ObserveResult("host-a", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("host-a", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"Qwen/Test","messages":[{"role":"user","content":"hello"}]}`))
@@ -1701,7 +1705,9 @@ func TestGatewayWiresQuarantineIntoCapacityWithoutPhaseGate(t *testing.T) {
 	g.participantLimiter = limiter
 	g.attachCapacityLiveAvailability()
 
-	limiter.ObserveResult("host-a", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("host-a", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	rec := httptest.NewRecorder()
@@ -1818,7 +1824,9 @@ func TestGatewayChooseRuntimeSkipsParticipantLimitedDevshard(t *testing.T) {
 	// No phase poll between the 503 and the pick - reactivity comes
 	// from the live throttle source.
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	limited := &devshardRuntime{
 		id: "6", model: "m",
@@ -1845,7 +1853,9 @@ func TestGatewayChooseRuntimePrefersHealthyEscrowWithoutBenchingPartial(t *testi
 	// be benched entirely - it should still receive *some* traffic
 	// (its W(e) is half), just less than a fully healthy peer.
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("dead-host", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("dead-host", "/sessions/6/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	mixed := &devshardRuntime{
 		id: "6", model: "m",
@@ -1874,7 +1884,9 @@ func TestGatewayChooseRuntimePrefersHealthyEscrowWithoutBenchingPartial(t *testi
 
 func TestGatewayChooseRuntimeFailsWhenAllDevshardsParticipantLimited(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	a := &devshardRuntime{
 		id: "6", model: "m",
@@ -1902,7 +1914,9 @@ func TestGatewayChooseRuntimeReactsToRecoveryWithoutPhasePoll(t *testing.T) {
 	// the next pick must route there again - no phase-gate poll
 	// involved.
 	limiter := NewParticipantRequestLimiter(1, 60) // 1 token/sec
-	limiter.ObserveResult("a-host", "/x", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("a-host", "/x", http.StatusServiceUnavailable)
+	})
 
 	a := &devshardRuntime{
 		id: "a", model: "m",
@@ -1998,14 +2012,79 @@ func TestParticipantRequestLimiterUntrackedHostAlwaysAllowed(t *testing.T) {
 	require.True(t, limiter.allow("shared-host", now))
 }
 
+// repeatFailures issues the unified strike-threshold worth of identical
+// failures, the new minimum to trip a participant into quarantine — a single
+// transient failure (one 503 during model warm-up, one reset connection) no
+// longer exiles a live host.
+func repeatFailures(observe func()) {
+	for i := 0; i < participantFailureStrikeThreshold; i++ {
+		observe()
+	}
+}
+
+// TestParticipantRequestLimiterSingleTransientFailureDoesNotQuarantine is the
+// core of the de-twitch fix: a lone 503, a lone connection reset, or a lone
+// 404 — the kind a live host throws while a model warms up or during a brief
+// blip — must NOT exile the host. Quarantine only trips once failures reach
+// the strike threshold.
+func TestParticipantRequestLimiterSingleTransientFailureDoesNotQuarantine(t *testing.T) {
+	limiter := NewParticipantRequestLimiter(10, 10)
+
+	limiter.ObserveResult("http-host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+	require.False(t, limiter.IsBlocked("http-host"), "a single 503 must not quarantine")
+
+	limiter.ObserveResult("throttle-host", "/sessions/1/chat/completions", http.StatusTooManyRequests)
+	require.False(t, limiter.IsBlocked("throttle-host"), "a single 429 must not quarantine")
+
+	limiter.ObserveTransportFailure("transport-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: connection refused"))
+	require.False(t, limiter.IsBlocked("transport-host"), "a single connection reset must not quarantine")
+
+	limiter.ObserveResult("nf-host", "/sessions/1/chat/completions", http.StatusNotFound)
+	require.False(t, limiter.IsBlocked("nf-host"), "a single 404 must not quarantine")
+}
+
+// TestParticipantRequestLimiter503QuarantinesAtThreshold pins the tripping
+// point: the host is available through strike (threshold-1) and quarantines on
+// the threshold-th consecutive 503, using the throttle (60m) duration.
+func TestParticipantRequestLimiter503QuarantinesAtThreshold(t *testing.T) {
+	limiter := NewParticipantRequestLimiter(10, 10)
+	t0 := time.Now()
+
+	for i := 0; i < participantFailureStrikeThreshold-1; i++ {
+		limiter.ObserveResult("host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+		require.False(t, limiter.IsBlocked("host"), "not blocked before threshold")
+	}
+	limiter.ObserveResult("host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+	require.True(t, limiter.IsBlocked("host"), "blocked on the threshold strike")
+	require.False(t, limiter.allow("host", t0.Add(transportFailureQuarantine+time.Second)), "still out during throttle window")
+	require.True(t, limiter.allow("host", t0.Add(httpThrottleQuarantine+time.Second)), "recovers after the throttle window")
+}
+
+// TestParticipantRequestLimiterInterleavedSuccessKeepsFlakyHostInRotation proves
+// the strike counter is a rolling budget, not a tripwire: a host that mixes
+// successes with occasional 503s never reaches the threshold and stays live.
+func TestParticipantRequestLimiterInterleavedSuccessKeepsFlakyHostInRotation(t *testing.T) {
+	limiter := NewParticipantRequestLimiter(10, 10)
+
+	for i := 0; i < participantFailureStrikeThreshold*3; i++ {
+		limiter.ObserveResult("flaky-host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+		limiter.ObserveSuccessfulInference("flaky-host")
+	}
+	require.False(t, limiter.IsBlocked("flaky-host"), "a mostly-working host that occasionally 503s stays in rotation")
+}
+
 func TestParticipantRequestLimiterTransportShorterQuarantineThan503(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
 	t0 := time.Now()
-	limiter.ObserveTransportFailure("transport-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: connection refused"))
+	repeatFailures(func() {
+		limiter.ObserveTransportFailure("transport-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: connection refused"))
+	})
 	require.True(t, limiter.IsBlocked("transport-host"))
 	require.True(t, limiter.allow("transport-host", t0.Add(transportFailureQuarantine+time.Second)))
 
-	limiter.ObserveResult("http-host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("http-host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+	})
 	require.True(t, limiter.IsBlocked("http-host"))
 	require.False(t, limiter.allow("http-host", t0.Add(transportFailureQuarantine+time.Second)))
 	require.True(t, limiter.allow("http-host", t0.Add(httpThrottleQuarantine+time.Second)))
@@ -2019,8 +2098,10 @@ func TestParticipantRequestLimiterTransportFailureOnVerifyTimeoutDoesNotQuaranti
 	limiter.ObserveTransportFailure("gossip-host", "/sessions/1/gossip/nonce", fmt.Errorf("connection refused"))
 	require.False(t, limiter.IsBlocked("gossip-host"), "gossip transport failure must not quarantine")
 
-	limiter.ObserveTransportFailure("infer-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: i/o timeout"))
-	require.True(t, limiter.IsBlocked("infer-host"), "inference transport failure must quarantine")
+	repeatFailures(func() {
+		limiter.ObserveTransportFailure("infer-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: i/o timeout"))
+	})
+	require.True(t, limiter.IsBlocked("infer-host"), "inference transport failure quarantines after repeated strikes")
 }
 
 func TestParticipantRequestLimiterEOFTransportFailureQuarantinesAfterThreeConsecutive(t *testing.T) {
@@ -2054,11 +2135,15 @@ func TestParticipantRequestLimiterSuccessfulInferenceDecrementsEOFTransportFailu
 func TestParticipantRequestLimiterInferenceRouteFailureUsesShortQuarantine(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
 	t0 := time.Now()
-	limiter.ObserveResult("broken-host", "/sessions/38/chat/completions", http.StatusNotFound)
+	repeatFailures(func() {
+		limiter.ObserveResult("broken-host", "/sessions/38/chat/completions", http.StatusNotFound)
+	})
 	require.True(t, limiter.IsBlocked("broken-host"))
 	require.True(t, limiter.allow("broken-host", t0.Add(transportFailureQuarantine+time.Second)))
 
-	limiter.ObserveResult("forbidden-host", "/sessions/38/chat/completions", http.StatusForbidden)
+	repeatFailures(func() {
+		limiter.ObserveResult("forbidden-host", "/sessions/38/chat/completions", http.StatusForbidden)
+	})
 	require.True(t, limiter.IsBlocked("forbidden-host"))
 	require.True(t, limiter.allow("forbidden-host", t0.Add(transportFailureQuarantine+time.Second)))
 }
@@ -2067,7 +2152,9 @@ func TestParticipantRequestLimiterTimestampDriftUsesShortQuarantine(t *testing.T
 	limiter := NewParticipantRequestLimiter(10, 10)
 	t0 := time.Now()
 
-	limiter.ObserveResultWithBody("drift-host", "/sessions/38/chat/completions", http.StatusUnauthorized, `{"error":"timestamp drift 64s exceeds maximum 30s"}`)
+	repeatFailures(func() {
+		limiter.ObserveResultWithBody("drift-host", "/sessions/38/chat/completions", http.StatusUnauthorized, `{"error":"timestamp drift 64s exceeds maximum 30s"}`)
+	})
 
 	require.True(t, limiter.IsBlocked("drift-host"))
 	require.True(t, limiter.allow("drift-host", t0.Add(transportFailureQuarantine+time.Second)))
@@ -2106,7 +2193,9 @@ func TestParticipantRequestLimiterUsesUpdatedThrottleSettings(t *testing.T) {
 		StalledWinnerQuarantineMS:      175,
 		EmptyStreamQuarantineThreshold: 2,
 	})
-	limiter.ObserveTransportFailure("transport-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: connection refused"))
+	repeatFailures(func() {
+		limiter.ObserveTransportFailure("transport-host", "/sessions/1/chat/completions", fmt.Errorf("dial tcp: connection refused"))
+	})
 	transportQuarantineAt := time.Now()
 	require.True(t, limiter.IsBlocked("transport-host"))
 	require.True(t, limiter.allow("transport-host", transportQuarantineAt.Add(101*time.Millisecond)))
@@ -2155,8 +2244,12 @@ func TestRedundancyNoWinnerParticipantIncludesShadowQuarantineAndProbation(t *te
 	for i := 0; i < emptyStreamQuarantineThreshold; i++ {
 		limiter.ObserveEmptyStream("shadow-host")
 	}
-	limiter.ObserveResult("probe-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
-	limiter.ObserveResult("probation-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("probe-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
+	repeatFailures(func() {
+		limiter.ObserveResult("probation-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 	require.True(t, limiter.ClearQuarantine("probation-host"))
 
 	redundancy := &Redundancy{
@@ -2176,7 +2269,9 @@ func TestRedundancyNoWinnerParticipantIncludesShadowQuarantineAndProbation(t *te
 
 func TestParticipantRequestLimiterRecoversAfterThrottle(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	now := time.Now()
 	require.False(t, limiter.allow("shared-host", now))
@@ -2187,7 +2282,9 @@ func TestParticipantRequestLimiterRecoversAfterThrottle(t *testing.T) {
 func TestParticipantRequestLimiterProbeQuarantineIsModelScoped(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
 
-	limiter.ObserveResultForModel("shared-host", "Kimi/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResultForModel("shared-host", "Kimi/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	require.True(t, limiter.IsBlockedForModel("shared-host", "Kimi/Test"))
 	require.False(t, limiter.IsBlockedForModel("shared-host", "Qwen/Test"))
@@ -2218,7 +2315,9 @@ func TestParticipantRequestLimiterShadowQuarantineIsModelScoped(t *testing.T) {
 
 func TestParticipantRequestLimiterMarksParticipantExhaustedOn503(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(2, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	require.Equal(t, 1, limiter.ExhaustedCount())
 	require.Equal(t, 1, limiter.TrackedCount())
@@ -2227,7 +2326,9 @@ func TestParticipantRequestLimiterMarksParticipantExhaustedOn503(t *testing.T) {
 
 func TestParticipantRequestLimiterExpiresOnFullRecovery(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	require.Equal(t, 1, limiter.TrackedCount())
 	require.Equal(t, 1, limiter.ExhaustedCount())
@@ -2248,7 +2349,9 @@ func TestParticipantRequestLimiterExpiresOnFullRecovery(t *testing.T) {
 
 func TestParticipantRequestLimiterClearQuarantineStartsProbation(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	require.True(t, limiter.ClearQuarantine("shared-host"))
 	require.False(t, limiter.IsBlocked("shared-host"))
@@ -2278,7 +2381,9 @@ func TestParticipantRequestLimiterPersistsThrottleState(t *testing.T) {
 
 	limiter := NewParticipantRequestLimiter(10, 10)
 	limiter.SetStore(store)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	rows, err := store.LoadParticipantThrottles()
 	require.NoError(t, err)
@@ -2297,7 +2402,9 @@ func TestParticipantRequestLimiterPersistsModelScopedThrottleState(t *testing.T)
 
 	limiter := NewParticipantRequestLimiter(10, 10)
 	limiter.SetStore(store)
-	limiter.ObserveResultForModel("shared-host", "Kimi/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResultForModel("shared-host", "Kimi/Test", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	rows, err := store.LoadParticipantThrottles()
 	require.NoError(t, err)
@@ -2361,7 +2468,9 @@ func TestParticipantRequestLimiterPersistsProbationOnExpiry(t *testing.T) {
 
 	limiter := NewParticipantRequestLimiter(10, 10)
 	limiter.SetStore(store)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	rows, err := store.LoadParticipantThrottles()
 	require.NoError(t, err)
@@ -2879,7 +2988,9 @@ func TestGatewayMetricsEndpointExposedAndUpdated(t *testing.T) {
 
 func TestGatewayMetricsCollectorIncludesParticipantLimiterState(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	rt := &devshardRuntime{
 		id:              "12",
@@ -2916,7 +3027,9 @@ func TestParticipantLimiterBypassedDuringRelaxedPoC(t *testing.T) {
 	t.Cleanup(func() { setPoCPhaseState(false, "") })
 
 	limiter := NewParticipantRequestLimiter(1, 10)
-	limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	repeatFailures(func() {
+		limiter.ObserveResult("shared-host", "/sessions/12/chat/completions", http.StatusServiceUnavailable)
+	})
 
 	require.NoError(t, limiter.AllowRequest("shared-host", "/sessions/12/chat/completions"))
 	require.NoError(t, limiter.CanAcceptEscrow([]string{"shared-host"}))
