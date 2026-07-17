@@ -59,9 +59,7 @@ import (
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 	groupkeeper "github.com/cosmos/cosmos-sdk/x/group/keeper"
 	_ "github.com/cosmos/cosmos-sdk/x/group/module" // import for side-effects
-	_ "github.com/cosmos/cosmos-sdk/x/mint"         // import for side-effects
-	mintkeeper "github.com/cosmos/cosmos-sdk/x/mint/keeper"
-	_ "github.com/cosmos/cosmos-sdk/x/params" // import for side-effects
+	_ "github.com/cosmos/cosmos-sdk/x/params"       // import for side-effects
 	paramsclient "github.com/cosmos/cosmos-sdk/x/params/client"
 	paramskeeper "github.com/cosmos/cosmos-sdk/x/params/keeper"
 	paramstypes "github.com/cosmos/cosmos-sdk/x/params/types"
@@ -134,7 +132,6 @@ type App struct {
 	ConsensusParamsKeeper consensuskeeper.Keeper
 
 	SlashingKeeper       slashingkeeper.Keeper
-	MintKeeper           mintkeeper.Keeper
 	GovKeeper            *govkeeper.Keeper
 	CrisisKeeper         *crisiskeeper.Keeper
 	UpgradeKeeper        *upgradekeeper.Keeper
@@ -264,7 +261,6 @@ func New(
 		&app.DistrKeeper,
 		&app.ConsensusParamsKeeper,
 		&app.SlashingKeeper,
-		&app.MintKeeper,
 		&app.GovKeeper,
 		&app.CrisisKeeper,
 		&app.UpgradeKeeper,
