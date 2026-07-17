@@ -365,6 +365,28 @@ func (am AppModule) handleExpiredInferenceWithContext(ctx context.Context, infer
 		return
 	}
 
+	// A node busy generating PoC during the PoC window is doing protocol-mandated work,
+	// not being down. Waive the expiry penalty so honest nodes aren't marked down for it.
+	if expiryCtx.IsBlockInPoCRange(inference.StartBlockHeight) || expiryCtx.IsBlockInPoCRange(expiryCtx.CurrentBlockHeight) {
+		am.LogInfo("Inference expired during PoC window, waiving penalty",
+			types.Inferences,
+			"inferenceId", inference.InferenceId,
+			"executor", inference.AssignedTo,
+			"model", inference.Model,
+			"epochIndex", epochToCheck.Index)
+
+		sdkCtx := sdk.UnwrapSDKContext(ctx)
+		sdkCtx.EventManager().EmitEvent(sdk.NewEvent(
+			"poc_penalty_waived",
+			sdk.NewAttribute("inference_id", inference.InferenceId),
+			sdk.NewAttribute("executor", inference.AssignedTo),
+			sdk.NewAttribute("reason", "expiry_during_poc_window"),
+		))
+
+		am.expireInferenceAndIssueRefund(ctx, inference)
+		return
+	}
+
 	// Executor has the required node, proceed with normal expiry handling (with penalty)
 	am.LogInfo("Inference expired, not finished. Issuing refund and penalizing executor",
 		types.Inferences,
