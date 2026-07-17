@@ -64,8 +64,6 @@ type (
 		EpochGroupValidationsMap  collections.Map[collections.Pair[uint64, string], types.EpochGroupValidations]
 		EpochGroupValidationEntry collections.KeySet[collections.Triple[uint64, string, string]]
 		SettleAmounts             collections.Map[sdk.AccAddress, types.SettleAmount]
-		// TODO(post v0.2.12): remove TopMiners and the key for it after upgrade clears the data
-		TopMiners                 collections.Map[sdk.AccAddress, types.TopMiner]
 		PartialUpgrades           collections.Map[uint64, types.PartialUpgrade]
 		EpochPerformanceSummaries collections.Map[collections.Pair[sdk.AccAddress, uint64], types.EpochPerformanceSummary]
 		TrainingExecAllowListSet  collections.KeySet[sdk.AccAddress]
@@ -352,13 +350,6 @@ func NewKeeper(
 			"settle_amount",
 			sdk.AccAddressKey,
 			codec.CollValue[types.SettleAmount](cdc),
-		),
-		TopMiners: collections.NewMap(
-			sb,
-			types.TopMinerPrefix,
-			"top_miner",
-			sdk.AccAddressKey,
-			codec.CollValue[types.TopMiner](cdc),
 		),
 		PartialUpgrades: collections.NewMap(
 			sb,

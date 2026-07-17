@@ -134,9 +134,9 @@ func TestTallyBugReproduction(t *testing.T) {
 		testApp.AccountKeeper.SetAccount(ctx, acc)
 	}
 	fundCoins := sdk.NewCoins(sdk.NewCoin(inferencetypes.BaseCoin, math.NewInt(100000000000)))
-	err = testApp.BankKeeper.MintCoins(ctx, inferencetypes.TopRewardPoolAccName, fundCoins)
+	err = testApp.BankKeeper.MintCoins(ctx, inferencetypes.ModuleName, fundCoins)
 	require.NoError(t, err)
-	err = testApp.BankKeeper.SendCoinsFromModuleToAccount(ctx, inferencetypes.TopRewardPoolAccName, voter101Addr, fundCoins)
+	err = testApp.BankKeeper.SendCoinsFromModuleToAccount(ctx, inferencetypes.ModuleName, voter101Addr, fundCoins)
 	require.NoError(t, err)
 
 	// Create a proposal
