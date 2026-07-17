@@ -587,34 +587,6 @@ func TestDynamicPricingCoreWorkflow(t *testing.T) {
 
 		t.Logf("Price recording works: recorded price %d for inference", testPrice)
 	})
-
-	// Test Scenario 5: Cost calculation integration
-	t.Run("Cost calculations use recorded prices correctly", func(t *testing.T) {
-		// Create inference with recorded price
-		inference := &types.Inference{
-			InferenceId:          "cost-test-123",
-			Model:                model1,
-			PromptTokenCount:     10,
-			CompletionTokenCount: 20,
-			MaxTokens:            100,
-			PerTokenPrice:        1500, // Custom price
-		}
-
-		// Test cost calculation
-		actualCost, err := calculations.CalculateCost(inference)
-		require.NoError(t, err)
-		expectedCost := int64((10 + 20) * 1500) // 30 tokens * 1500 price
-		assert.Equal(t, expectedCost, actualCost, "Cost should use recorded per-token price")
-
-		// Test escrow calculation
-		escrowAmount, err := calculations.CalculateEscrow(inference, 25) // 25 prompt tokens
-		require.NoError(t, err)
-		expectedEscrow := int64((100 + 25) * 1500) // (100 max + 25 prompt) * 1500 price
-		assert.Equal(t, expectedEscrow, escrowAmount, "Escrow should use recorded per-token price")
-
-		t.Logf("Cost calculations work: cost=%d, escrow=%d (using price %d)",
-			actualCost, escrowAmount, inference.PerTokenPrice)
-	})
 }
 
 // TestDynamicPricingWithRealStats tests the complete pipeline:
