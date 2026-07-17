@@ -11,8 +11,37 @@ import (
 	"strings"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/group"
 	"github.com/productscience/inference/x/inference/types"
 )
+
+// activeEpochWeight sums the weight of epoch-group members that submitted a seed signature
+// this epoch (the actively-participating set). Members present in the group but absent from
+// the seed set are excluded, so their stranded weight can't hold bridge quorum out of reach.
+// Falls back to fallbackTotal when no active weight is found, so quorum is never broken.
+func activeEpochWeight(members []*group.GroupMember, seedSigs []*types.SeedSignature, fallbackTotal int64) int64 {
+	active := make(map[string]struct{}, len(seedSigs))
+	for _, s := range seedSigs {
+		if s.Signature != "" {
+			active[s.MemberAddress] = struct{}{}
+		}
+	}
+	var sum int64
+	for _, m := range members {
+		if m.Member == nil {
+			continue
+		}
+		if _, ok := active[m.Member.Address]; ok {
+			if w, err := strconv.ParseInt(m.Member.Weight, 10, 64); err == nil {
+				sum += w
+			}
+		}
+	}
+	if sum <= 0 {
+		return fallbackTotal
+	}
+	return sum
+}
 
 func PubKeyToAddress(pubKey string) (string, error) {
 	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKey)
@@ -155,8 +184,10 @@ func (k msgServer) BridgeExchange(goCtx context.Context, msg *types.MsgBridgeExc
 		// validator's sub-key on each confirmation.
 		existingTx.Validators = nil
 
-		// Use total epoch power from epoch group data
-		totalEpochPower := epochGroup.GroupData.TotalWeight
+		// Quorum denominator = weight of members that actually participated this epoch
+		// (submitted a seed), not the full group weight — otherwise stranded/inactive weight
+		// in the denominator can push majority out of reach and deposits stall (liveness cliff).
+		totalEpochPower := activeEpochWeight(epochGroupMembers, epochGroup.GroupData.MemberSeedSignatures, epochGroup.GroupData.TotalWeight)
 
 		k.LogInfo("Bridge exchange: Additional validator added",
 			types.Messages,
