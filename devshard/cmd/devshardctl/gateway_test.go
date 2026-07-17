@@ -2073,6 +2073,24 @@ func TestParticipantRequestLimiterInterleavedSuccessKeepsFlakyHostInRotation(t *
 	require.False(t, limiter.IsBlocked("flaky-host"), "a mostly-working host that occasionally 503s stays in rotation")
 }
 
+// TestParticipantRequestLimiterHardFailureEscalatesShadowToProbe proves the
+// escalation path: a host in traffic-receiving shadow quarantine (empty-stream)
+// that then starts returning hard 503s is pulled from rotation (probe) at once
+// rather than continuing to receive traffic until the shadow window expires.
+func TestParticipantRequestLimiterHardFailureEscalatesShadowToProbe(t *testing.T) {
+	limiter := NewParticipantRequestLimiter(10, 10)
+
+	for i := 0; i < emptyStreamQuarantineThreshold; i++ {
+		limiter.ObserveEmptyStream("degrading-host")
+	}
+	require.True(t, limiter.IsShadowQuarantined("degrading-host"), "empty streams put the host in shadow")
+	require.False(t, limiter.IsBlocked("degrading-host"), "shadow still receives traffic")
+
+	limiter.ObserveResult("degrading-host", "/sessions/1/chat/completions", http.StatusServiceUnavailable)
+	require.True(t, limiter.IsBlocked("degrading-host"), "a hard 503 during shadow escalates to probe (no traffic)")
+	require.False(t, limiter.IsShadowQuarantined("degrading-host"))
+}
+
 func TestParticipantRequestLimiterTransportShorterQuarantineThan503(t *testing.T) {
 	limiter := NewParticipantRequestLimiter(10, 10)
 	t0 := time.Now()

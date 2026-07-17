@@ -1162,15 +1162,27 @@ func (l *ParticipantRequestLimiter) probationActiveLocked(state *participantRequ
 	return state != nil && state.failureStrikes > 0 && state.quarantineUntil.IsZero()
 }
 
+// quarantineModeSeverity ranks quarantine modes so the more aggressive one
+// wins when a host's condition worsens: probe (no traffic) outranks shadow
+// (still receives traffic, answers discarded).
+func quarantineModeSeverity(mode participantQuarantineMode) int {
+	if mode == participantQuarantineProbe {
+		return 2
+	}
+	return 1
+}
+
 // registerFailureStrikeLocked records one transient inference failure for a
 // participant and quarantines it only once failures reach the strike
 // threshold. Every transient failure class — dropped connection, empty stream,
 // HTTP throttle/4xx — funnels through this one gate so a lone blip (a 503 while
 // a model warms up, a momentary 429, one reset connection) no longer exiles an
-// otherwise-live host for 30-60 minutes. It returns the post-increment strike
-// count, whether this strike tripped quarantine, and whether the host was
-// already quarantined (in which case no strike is counted and the caller stays
-// silent).
+// otherwise-live host for 30-60 minutes. The quarantine takes the mode of the
+// tripping strike (the host's most-recent signal); a more severe failure that
+// arrives during an active traffic-receiving shadow window escalates it to
+// probe immediately. It returns the post-increment strike count, whether this
+// strike tripped (or escalated) quarantine, and whether the strike was dropped
+// because the host was already quarantined at an equal-or-higher severity.
 func (l *ParticipantRequestLimiter) registerFailureStrikeLocked(participantKey, modelID string, now time.Time, quarantineFor time.Duration, mode participantQuarantineMode, reason string, status int) (strikes int, quarantined bool, skipped bool) {
 	state := l.ensureStateLocked(participantKey, now)
 	l.clearExpiredQuarantineIfAnyLocked(participantKey, state, now)
@@ -1179,6 +1191,20 @@ func (l *ParticipantRequestLimiter) registerFailureStrikeLocked(participantKey, 
 		state = l.ensureStateLocked(participantKey, now)
 	}
 	if l.inQuarantineLocked(state, now) {
+		// Escalate only when this failure is more severe than the active mode
+		// (probe > shadow): a host that starts hard-failing during a shadow
+		// window is pulled from rotation now instead of at window expiry.
+		if quarantineModeSeverity(mode) > quarantineModeSeverity(state.quarantineMode) {
+			end := state.quarantineUntil
+			if candidate := now.Add(quarantineFor); candidate.After(end) {
+				end = candidate
+			}
+			l.applyQuarantineLocked(participantKey, modelID, end, now, mode)
+			state.quarantineMode = mode // force escalation even when not extending
+			l.recordQuarantineTransition(participantKey, modelID, mode.String(), reason)
+			l.persistThrottledStateLocked(participantKey, state, status)
+			return state.failureStrikes, true, false
+		}
 		return state.failureStrikes, false, true
 	}
 	l.addModelLocked(state, modelID)
