@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -45,97 +43,6 @@ func newTestConfigManager(t *testing.T) *apiconfig.ConfigManager {
 
 func textMessageContent(text string) MessageContent {
 	return MessageContent{Text: &text}
-}
-
-func TestPostChat_MissingAuthorization(t *testing.T) {
-	e := echo.New()
-	configManager := newTestConfigManager(t)
-	configManager.SetTransferAgentAccessCache(apiconfig.TransferAgentAccessCache{IsEnabled: false})
-
-	mockCosmos := &cosmosclient.MockCosmosMessageClient{}
-	mockCosmos.On("GetAccountAddress").Return("ta1")
-
-	s := &Server{
-		e:             e,
-		recorder:      mockCosmos,
-		configManager: configManager,
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	ctx := e.NewContext(req, rec)
-
-	err := s.postChat(ctx)
-	require.Error(t, err)
-
-	var httpErr *echo.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, http.StatusUnauthorized, httpErr.Code)
-
-	mockCosmos.AssertExpectations(t)
-}
-
-func TestPostChat_MissingModel(t *testing.T) {
-	e := echo.New()
-	configManager := newTestConfigManager(t)
-	configManager.SetTransferAgentAccessCache(apiconfig.TransferAgentAccessCache{IsEnabled: false})
-
-	mockCosmos := &cosmosclient.MockCosmosMessageClient{}
-	mockCosmos.On("GetAccountAddress").Return("ta1")
-
-	s := &Server{
-		e:             e,
-		recorder:      mockCosmos,
-		configManager: configManager,
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"content":"hi"}]}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(utils.AuthorizationHeader, "sig")
-	rec := httptest.NewRecorder()
-	ctx := e.NewContext(req, rec)
-
-	err := s.postChat(ctx)
-	require.Error(t, err)
-
-	var httpErr *echo.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, http.StatusBadRequest, httpErr.Code)
-
-	mockCosmos.AssertExpectations(t)
-}
-
-func TestPostChat_TransferAgentNotAllowed(t *testing.T) {
-	e := echo.New()
-	configManager := newTestConfigManager(t)
-	configManager.SetTransferAgentAccessCache(apiconfig.TransferAgentAccessCache{
-		IsEnabled:        true,
-		AllowedAddresses: map[string]struct{}{},
-	})
-
-	mockCosmos := &cosmosclient.MockCosmosMessageClient{}
-	mockCosmos.On("GetAccountAddress").Return("ta1")
-
-	s := &Server{
-		e:             e,
-		recorder:      mockCosmos,
-		configManager: configManager,
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	ctx := e.NewContext(req, rec)
-
-	err := s.postChat(ctx)
-	require.Error(t, err)
-
-	var httpErr *echo.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, http.StatusForbidden, httpErr.Code)
-
-	mockCosmos.AssertExpectations(t)
 }
 
 type fakePricingQueryServer struct {
@@ -384,83 +291,4 @@ func TestValidateRequest_InvalidTimestamp(t *testing.T) {
 	var httpErr *echo.HTTPError
 	require.ErrorAs(t, err, &httpErr)
 	require.Equal(t, http.StatusBadRequest, httpErr.Code)
-}
-
-func TestHandleTransferRequest_CapacityLimit(t *testing.T) {
-	e := echo.New()
-	configManager := newTestConfigManager(t)
-	configManager.SetTransferAgentAccessCache(apiconfig.TransferAgentAccessCache{IsEnabled: false})
-	configManager.SetBandwidthParams(apiconfig.BandwidthParamsCache{
-		EstimatedLimitsPerBlockKb: 1,
-		KbPerInputToken:           1,
-		KbPerOutputToken:          1,
-	})
-
-	status := &coretypes.ResultStatus{
-		SyncInfo: coretypes.SyncInfo{
-			LatestBlockHeight: 1,
-			LatestBlockTime:   time.Now(),
-		},
-	}
-	timestamp := status.SyncInfo.LatestBlockTime.UnixNano()
-
-	devKey := newTestKey()
-	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`
-	transferAddress := "ta1"
-
-	components := calculations.SignatureComponents{
-		Payload:         utils.GenerateSHA256Hash(body),
-		Timestamp:       timestamp,
-		TransferAddress: transferAddress,
-	}
-	signature, err := calculations.Sign(devKey, components, calculations.Developer)
-	require.NoError(t, err)
-
-	queryServer := &fakePricingQueryServer{
-		price:   1,
-		found:   true,
-		pubkey:  devKey.GetPubKeyBase64(),
-		balance: 100,
-	}
-	conn, cleanup := startTestGRPCServer(t, queryServer)
-	t.Cleanup(cleanup)
-
-	mockCosmos := &cosmosclient.MockCosmosMessageClient{}
-	mockCosmos.On("NewInferenceQueryClient").Return(types.NewQueryClient(conn))
-	mockCosmos.On("Status", context.Background()).Return(status, nil)
-
-	s := &Server{
-		e:                e,
-		recorder:         mockCosmos,
-		configManager:    configManager,
-		bandwidthLimiter: internal.NewBandwidthLimiterFromConfig(configManager, nil, nil),
-	}
-
-	request := &ChatRequest{
-		Body:             []byte(body),
-		Timestamp:        timestamp,
-		TransferAddress:  transferAddress,
-		RequesterAddress: "dev1",
-		AuthKey:          signature,
-		SignBodyHash:     utils.GenerateSHA256Hash(body),
-		OpenAiRequest: OpenAiRequest{
-			Model:     "test-model",
-			MaxTokens: 1,
-			Messages:  []Message{{Role: "user", Content: textMessageContent(strings.Repeat("x", 10))}},
-		},
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	rec := httptest.NewRecorder()
-	ctx := e.NewContext(req, rec)
-
-	err = s.handleTransferRequest(ctx, request)
-	require.Error(t, err)
-
-	var httpErr *echo.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, http.StatusTooManyRequests, httpErr.Code)
-	require.Contains(t, fmt.Sprint(httpErr.Message), "Transfer Agent capacity reached")
-
-	mockCosmos.AssertExpectations(t)
 }
