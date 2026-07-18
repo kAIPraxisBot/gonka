@@ -8,8 +8,6 @@ import (
 	pserver "decentralized-api/internal/server/public"
 	"decentralized-api/internal/validation"
 	"decentralized-api/payloadstorage"
-	"net/http"
-	_ "net/http/pprof"
 
 	"cosmossdk.io/x/feegrant"
 	upgradetypes "cosmossdk.io/x/upgrade/types"
@@ -61,7 +59,6 @@ func NewServer(
 	}
 
 	e.Use(middleware.LoggingMiddleware)
-	e.Any("/debug/pprof/*", echo.WrapHandler(http.DefaultServeMux))
 	g := e.Group("/admin/v1/")
 
 	g.POST("nodes", s.createNewNode)
@@ -124,7 +121,7 @@ func (s *Server) Start(addr string) {
 	go s.e.Start(addr)
 }
 
-// getConfig returns the current configuration as JSON (unsanitized)
+// getConfig returns the current configuration as JSON with secrets stripped.
 func (s *Server) getConfig(c echo.Context) error {
 	// SanitizedConfig strips secrets (worker private key, PoC seeds); the raw
 	// GetConfig would leak MLNodeKeyConfig.WorkerPrivateKey over this endpoint.
