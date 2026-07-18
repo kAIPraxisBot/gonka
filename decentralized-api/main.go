@@ -316,7 +316,15 @@ func main() {
 	}
 	// Negative ports explicitly disable the NodeManager gRPC server.
 	if nmGrpcPort > 0 {
-		nmGrpcServer := grpc.NewServer()
+		grpcOpts := []grpc.ServerOption{}
+		if token := os.Getenv("NODE_MANAGER_API_TOKEN"); token != "" {
+			grpcOpts = append(grpcOpts,
+				grpc.UnaryInterceptor(nodemanager.AuthUnaryInterceptor(token)),
+				grpc.StreamInterceptor(nodemanager.AuthStreamInterceptor(token)))
+		} else {
+			log.Printf("SECURITY WARNING: node-manager gRPC has no authentication (NODE_MANAGER_API_TOKEN unset) — it must be reachable only on a trusted private network")
+		}
+		nmGrpcServer := grpc.NewServer(grpcOpts...)
 		nmgen.RegisterNodeManagerServer(nmGrpcServer, nodemanager.NewServer(nodeBroker, configManager, chainPhaseTracker))
 		reflection.Register(nmGrpcServer)
 		nodeManagerAddr := fmt.Sprintf(":%v", nmGrpcPort)
