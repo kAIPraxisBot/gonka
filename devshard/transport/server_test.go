@@ -100,6 +100,12 @@ func (env *serverTestEnv) doPost(t *testing.T, path string, body []byte) *httpte
 func (env *serverTestEnv) doGet(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	ts := time.Now().Unix()
+	signed := getSignatureBody(http.MethodGet, req.URL.Path, req.URL.RawQuery)
+	sig, err := SignRequest(env.userSigner, "escrow-1", signed, ts)
+	require.NoError(t, err)
+	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
+	req.Header.Set(HeaderTimestamp, fmt.Sprintf("%d", ts))
 	rec := httptest.NewRecorder()
 	env.echo.ServeHTTP(rec, req)
 	return rec
@@ -242,6 +248,50 @@ func TestServer_GetMempool(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 	require.NotEmpty(t, result.Txs)
+}
+
+func TestServer_GetMempool_NoAuth(t *testing.T) {
+	env := setupServerEnv(t)
+	req := httptest.NewRequest(http.MethodGet, testSessionPath("/mempool"), nil)
+	rec := httptest.NewRecorder()
+	env.echo.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestServer_GetMempool_NotInGroup(t *testing.T) {
+	env := setupServerEnv(t)
+
+	outsider := testutil.MustGenerateKey(t)
+	req := httptest.NewRequest(http.MethodGet, testSessionPath("/mempool"), nil)
+	ts := time.Now().Unix()
+	signed := getSignatureBody(http.MethodGet, req.URL.Path, req.URL.RawQuery)
+	sig, err := SignRequest(outsider, "escrow-1", signed, ts)
+	require.NoError(t, err)
+	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
+	req.Header.Set(HeaderTimestamp, fmt.Sprintf("%d", ts))
+	rec := httptest.NewRecorder()
+	env.echo.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestServer_GetDiffs_WrongPathSig proves the signature binds the concrete
+// path+query: a signature valid for one GET target is rejected on another.
+func TestServer_GetDiffs_WrongPathSig(t *testing.T) {
+	env := setupServerEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, testSessionPath("/diffs?from=1&to=1"), nil)
+	ts := time.Now().Unix()
+	// Sign a DIFFERENT path than the one being requested.
+	signed := getSignatureBody(http.MethodGet, testSessionPath("/mempool"), "")
+	sig, err := SignRequest(env.userSigner, "escrow-1", signed, ts)
+	require.NoError(t, err)
+	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
+	req.Header.Set(HeaderTimestamp, fmt.Sprintf("%d", ts))
+	rec := httptest.NewRecorder()
+	env.echo.ServeHTTP(rec, req)
+	// Recovery over the wrong message yields a non-member address (403) or a
+	// recover error (401); either way it must not be authorized.
+	require.NotEqual(t, http.StatusOK, rec.Code)
 }
 
 func TestServer_RateLimit(t *testing.T) {

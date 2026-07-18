@@ -662,6 +662,17 @@ func (c *HTTPClient) doGet(ctx context.Context, url string) ([]byte, error) {
 		return nil, err
 	}
 
+	// GETs carry no body: sign the canonical method/path/query the server
+	// reconstructs from the concrete request URL.
+	ts := time.Now().Unix()
+	signed := getSignatureBody(http.MethodGet, req.URL.Path, req.URL.RawQuery)
+	sig, err := SignRequest(c.signer, c.escrowID, signed, ts)
+	if err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+	req.Header.Set(c.signatureHeader(), hex.EncodeToString(sig))
+	req.Header.Set(c.timestampHeader(), strconv.FormatInt(ts, 10))
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.observeTransportFailure(url, err)

@@ -30,6 +30,15 @@ func signatureMessage(escrowID string, body []byte, ts int64) []byte {
 	return h.Sum(nil)
 }
 
+// getSignatureBody builds the canonical byte string signed in place of a body
+// for GET requests, which carry none: method || '\n' || path || '\n' || rawQuery.
+// Both peer and server reconstruct it from the concrete request URL, so the
+// signature binds the session id (in the path) and query (e.g. nonce). The
+// method prefix domain-separates it from JSON POST bodies (which start with '{').
+func getSignatureBody(method, path, rawQuery string) []byte {
+	return []byte(method + "\n" + path + "\n" + rawQuery)
+}
+
 // SignRequest signs the request body with the signer's key.
 // Returns the raw signature bytes.
 func SignRequest(signer signing.Signer, escrowID string, body []byte, ts int64) ([]byte, error) {
