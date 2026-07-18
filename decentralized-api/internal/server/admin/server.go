@@ -1,9 +1,7 @@
 package admin
 
 import (
-	"crypto/subtle"
 	"log"
-	"net/http"
 	"os"
 
 	"decentralized-api/apiconfig"
@@ -43,25 +41,6 @@ type Server struct {
 
 const adminAPITokenEnv = "ADMIN_API_TOKEN"
 
-// adminBearerAuth requires "Authorization: Bearer <token>" on every admin
-// request, compared in constant time. The admin API exposes tx-send, node
-// management and a DB dump, so it must never be reachable unauthenticated on an
-// untrusted network. Enabled only when ADMIN_API_TOKEN is set; when unset the
-// server logs a loud warning and stays open (private-network deployments), so
-// enabling auth is a config change, not a code change.
-func adminBearerAuth(token string) echo.MiddlewareFunc {
-	want := []byte("Bearer " + token)
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			got := []byte(c.Request().Header.Get("Authorization"))
-			if subtle.ConstantTimeCompare(got, want) != 1 {
-				return echo.NewHTTPError(http.StatusUnauthorized, "admin authorization required")
-			}
-			return next(c)
-		}
-	}
-}
-
 func NewServer(
 	recorder cosmos_client.CosmosMessageClient,
 	nodeBroker *broker.Broker,
@@ -86,7 +65,7 @@ func NewServer(
 
 	e.Use(middleware.LoggingMiddleware)
 	if token := os.Getenv(adminAPITokenEnv); token != "" {
-		e.Use(adminBearerAuth(token))
+		e.Use(middleware.BearerAuth(token))
 	} else {
 		log.Printf("SECURITY WARNING: admin API has no authentication (%s unset) — it must be reachable only on a trusted private network", adminAPITokenEnv)
 	}

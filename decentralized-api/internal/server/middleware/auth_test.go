@@ -1,4 +1,4 @@
-package admin
+package middleware
 
 import (
 	"net/http"
@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAdminBearerAuth(t *testing.T) {
+func TestBearerAuth(t *testing.T) {
 	e := echo.New()
-	handler := adminBearerAuth("s3cret")(func(c echo.Context) error {
+	handler := BearerAuth("s3cret")(func(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
 	})
 
@@ -28,7 +28,7 @@ func TestAdminBearerAuth(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/admin/v1/nodes", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			if tc.authHeader != "" {
 				req.Header.Set("Authorization", tc.authHeader)
 			}
@@ -39,7 +39,7 @@ func TestAdminBearerAuth(t *testing.T) {
 				return
 			}
 			he, ok := err.(*echo.HTTPError)
-			require.True(t, ok, "expected an echo.HTTPError")
+			require.True(t, ok)
 			require.Equal(t, http.StatusUnauthorized, he.Code)
 		})
 	}
