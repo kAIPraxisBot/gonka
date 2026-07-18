@@ -171,11 +171,6 @@ func (m Message) ContentText() string {
 	return text
 }
 
-type ExecutorDestination struct {
-	Url     string `json:"url"`
-	Address string `json:"address"`
-}
-
 type ModelsResponse struct {
 	Models []types.Model `json:"models"`
 }
