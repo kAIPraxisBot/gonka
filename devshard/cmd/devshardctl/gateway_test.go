@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -350,6 +351,60 @@ func TestGatewayChooseRuntimeUsesLowestLoad(t *testing.T) {
 	require.Equal(t, "12", chosen.id)
 	require.EqualValues(t, 2, chosen.activeUserRequests.Load())
 	require.EqualValues(t, 5, chosen.reservedTokens.Load())
+}
+
+func TestGatewayPowerOfTwoPicksLighterOfSampledPairNotGlobalMin(t *testing.T) {
+	// Three eligible runtimes, same model, neutral W(e)=1 so load =
+	// activeUserRequests. Force the sampler to draw indices 0 and 2 and leave
+	// index 1 (the GLOBAL minimum) unsampled. Power-of-two must return the
+	// lighter of the SAMPLED pair, never the global min — that randomization is
+	// exactly what desynchronizes independent gateways and prevents herding.
+	a := &devshardRuntime{id: "a", model: "m"}
+	b := &devshardRuntime{id: "b", model: "m"}
+	c := &devshardRuntime{id: "c", model: "m"}
+	g := NewGateway([]*devshardRuntime{a, b, c}, NewGatewayLimiter(0, 0), "m")
+
+	ro := g.runtimeOrder
+	require.Len(t, ro, 3)
+	ro[0].activeUserRequests.Store(5) // sampled
+	ro[1].activeUserRequests.Store(0) // GLOBAL MIN — never sampled
+	ro[2].activeUserRequests.Store(9) // sampled
+
+	// Deterministic sampler: first call (n=3) -> 0, second (n=2) -> 1, which the
+	// distinct-index bump turns into 2. Sampled pair = {index 0, index 2}.
+	seq := []int{0, 1}
+	k := 0
+	orig := pickTwoRandomIndex
+	pickTwoRandomIndex = func(int) int { v := seq[k]; k++; return v }
+	defer func() { pickTwoRandomIndex = orig }()
+
+	chosen, err := g.reserveRuntimeForModel("m", 0)
+	require.NoError(t, err)
+	require.Equal(t, ro[0].id, chosen.id, "picks the lighter of the sampled pair (load 5 < 9)")
+	require.NotEqual(t, ro[1].id, chosen.id, "the unsampled global-min is NOT chosen — power-of-two, not argmin")
+}
+
+func TestChooseByPowerOfTwoExcludesZeroCapacityAndSignals429(t *testing.T) {
+	live := &devshardRuntime{id: "live", model: "m"}
+	dead := &devshardRuntime{id: "dead", model: "m"}
+	live.activeUserRequests.Store(50) // heavy but FINITE (unregistered -> W(e)=1)
+	g := NewGateway([]*devshardRuntime{live, dead}, NewGatewayLimiter(0, 0), "m")
+	// 'dead' escrow registered at zero weight -> W(e)=0 -> +Inf load.
+	g.capacity.SetEscrowMembership("dead", map[string]int{"h": 1})
+	g.capacity.SetHostWeights(map[string]float64{"h": 0}, false)
+
+	// The heavily-loaded-but-finite 'live' beats the +Inf 'dead': a
+	// zero-capacity escrow is excluded, so no false 429 while capacity exists.
+	chosen, load := g.chooseByPowerOfTwo([]*devshardRuntime{live, dead}, "m")
+	require.Equal(t, "live", chosen.id)
+	require.False(t, math.IsInf(load, +1))
+
+	// When EVERY candidate is zero-capacity, load is +Inf so the caller 429s.
+	live2 := &devshardRuntime{id: "live2", model: "m"}
+	g.capacity.SetEscrowMembership("live2", map[string]int{"h2": 1})
+	g.capacity.SetHostWeights(map[string]float64{"h": 0, "h2": 0}, false)
+	_, load2 := g.chooseByPowerOfTwo([]*devshardRuntime{dead, live2}, "m")
+	require.True(t, math.IsInf(load2, +1))
 }
 
 func TestGatewayHandleDevshardRewritesInnerPath(t *testing.T) {

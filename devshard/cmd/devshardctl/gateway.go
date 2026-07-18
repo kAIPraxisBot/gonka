@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,7 +64,6 @@ type Gateway struct {
 	replenishmentMu       sync.Mutex
 	replenishmentInFlight map[string]struct{}
 	mu                    sync.Mutex
-	roundRobinSeed        atomic.Uint64
 }
 
 type devshardRuntime struct {
@@ -1586,20 +1586,9 @@ func (g *Gateway) reserveRuntimeForModel(requestModel string, inputTokens int64)
 		candidates = matching
 	}
 
-	bestScore := g.runtimeLoad(candidates[0], requestModel)
-	best := []*devshardRuntime{candidates[0]}
-	for _, rt := range candidates[1:] {
-		score := g.runtimeLoad(rt, requestModel)
-		switch {
-		case score < bestScore:
-			bestScore = score
-			best = []*devshardRuntime{rt}
-		case score == bestScore:
-			best = append(best, rt)
-		}
-	}
+	chosen, chosenLoad := g.chooseByPowerOfTwo(candidates, requestModel)
 
-	// All candidates score +Inf only when every escrow's W(e) == 0 -
+	// chosenLoad is +Inf only when every candidate escrow's W(e) == 0 -
 	// i.e. every host is PoC-excluded or fully throttled. Surface this
 	// as a participant-rate-limit error so callers see the existing
 	// 429 path instead of dispatching a request that is guaranteed to
@@ -1607,8 +1596,8 @@ func (g *Gateway) reserveRuntimeForModel(requestModel string, inputTokens int64)
 	// it: a host can have W(e)==0 for many reasons (raw capacity 0, PoC
 	// exclusion, reactive throttle, share rounding) and surfacing only
 	// the throttled subset would mislead operators about the root
-	// cause. Per-escrow W(e) is logged below for diagnostics.
-	if math.IsInf(bestScore, +1) {
+	// cause. Per-escrow W(e) is logged for diagnostics.
+	if math.IsInf(chosenLoad, +1) {
 		log.Printf(
 			"gateway: all %d candidate escrow(s) at zero capacity, returning 429; per-escrow weights: %s",
 			len(candidates), g.formatCandidateWeightsLocked(candidates, requestModel),
@@ -1616,16 +1605,62 @@ func (g *Gateway) reserveRuntimeForModel(requestModel string, inputTokens int64)
 		return nil, &EscrowParticipantRateLimitError{}
 	}
 
-	chosen := best[0]
-	if len(best) > 1 {
-		idx := int(g.roundRobinSeed.Add(1)-1) % len(best)
-		chosen = best[idx]
-	}
 	g.reserveRuntimeLocked(chosen, inputTokens)
 	if g.metrics != nil {
 		g.metrics.RecordPickerChoice(chosen.id, chosen.model)
 	}
 	return chosen, nil
+}
+
+// pickTwoRandomIndex returns a uniform random index in [0, n) for the
+// power-of-two-choices runtime picker. Indirected through a var so tests can
+// make the pick deterministic (mirrors pairwiseABRandom). Go's global rand is
+// auto-seeded per process, so independent gateways draw different sequences —
+// which is exactly what desynchronizes them and prevents herding.
+var pickTwoRandomIndex = func(n int) int { return rand.Intn(n) }
+
+// chooseByPowerOfTwo selects the runtime to receive the next request using the
+// power-of-two-choices rule: sample two distinct eligible candidates at random
+// and take the one with the lower load. Independent gateways share no view of
+// each other's load on the participants they both route to, so a deterministic
+// global-argmin makes them all pile onto the same "least loaded" escrow at once
+// (the herd). The randomized two-choice pick desynchronizes gateways, so it
+// balances load with NO shared state while still strongly preferring lightly
+// loaded hosts (max load drops from ~global-argmin-herd to near-optimal).
+//
+// Zero-capacity (+Inf load) candidates are filtered out first so the caller's
+// all-+Inf 429 path fires iff EVERY candidate is at zero capacity, not just the
+// two that happened to be sampled. Returns the chosen runtime and its load
+// (+Inf with a placeholder runtime when nothing is eligible).
+func (g *Gateway) chooseByPowerOfTwo(candidates []*devshardRuntime, requestModel string) (*devshardRuntime, float64) {
+	type scored struct {
+		rt   *devshardRuntime
+		load float64
+	}
+	eligible := make([]scored, 0, len(candidates))
+	for _, rt := range candidates {
+		if l := g.runtimeLoad(rt, requestModel); !math.IsInf(l, +1) {
+			eligible = append(eligible, scored{rt, l})
+		}
+	}
+	switch len(eligible) {
+	case 0:
+		// Every candidate is zero-capacity; signal the caller's 429 path.
+		return candidates[0], math.Inf(+1)
+	case 1:
+		return eligible[0].rt, eligible[0].load
+	}
+	// Two distinct indices in [0, len(eligible)).
+	i := pickTwoRandomIndex(len(eligible))
+	j := pickTwoRandomIndex(len(eligible) - 1)
+	if j >= i {
+		j++
+	}
+	a, b := eligible[i], eligible[j]
+	if b.load < a.load {
+		return b.rt, b.load
+	}
+	return a.rt, a.load
 }
 
 func (g *Gateway) runtimeAtNonceLimit(rt *devshardRuntime) bool {
