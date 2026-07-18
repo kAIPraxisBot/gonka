@@ -160,7 +160,7 @@ func TestVestingIntegration_ParameterBased(t *testing.T) {
 		Return(nil)
 
 	// Execute payment from top reward pool module
-	err = k.PayParticipantFromModule(ctx, participantAddrStr, rewardAmount, types.TopRewardPoolAccName, "reward-memo", &rewardVestingPeriod)
+	err = k.PayParticipantFromModule(ctx, participantAddrStr, rewardAmount, types.ModuleName, "reward-memo", &rewardVestingPeriod)
 	require.NoError(t, err)
 }
 
@@ -186,13 +186,13 @@ func TestVestingIntegration_DirectPayment(t *testing.T) {
 	// Mock expectation for direct payment (no vesting)
 
 	mocks.BankKeeper.EXPECT().
-		SendCoinsFromModuleToAccount(ctx, types.TopRewardPoolAccName, participantAddr, expectedCoins, gomock.Any()).
+		SendCoinsFromModuleToAccount(ctx, types.ModuleName, participantAddr, expectedCoins, gomock.Any()).
 		Return(nil)
 
 	// No vesting keeper calls should be made
 
 	// Execute payment with zero vesting period
-	err = k.PayParticipantFromModule(ctx, participantAddrStr, amount, types.TopRewardPoolAccName, "direct-payment", &zeroVestingPeriod)
+	err = k.PayParticipantFromModule(ctx, participantAddrStr, amount, types.ModuleName, "direct-payment", &zeroVestingPeriod)
 	require.NoError(t, err)
 }
 
@@ -287,7 +287,7 @@ func TestVestingIntegration_MixedVestingScenario(t *testing.T) {
 		AddVestedRewards(gomock.Any(), participantAddrStr, "inference", expectedRewardCoins, &rewardVestingPeriod, gomock.Any()).
 		Return(nil)
 
-	err = k.PayParticipantFromModule(ctx, participantAddrStr, rewardAmount, types.TopRewardPoolAccName, "reward-payment", &rewardVestingPeriod)
+	err = k.PayParticipantFromModule(ctx, participantAddrStr, rewardAmount, types.ModuleName, "reward-payment", &rewardVestingPeriod)
 	require.NoError(t, err)
 }
 
@@ -324,7 +324,7 @@ func TestVestingIntegration_ErrorHandling(t *testing.T) {
 		AddVestedRewards(gomock.Any(), participantAddrStr, types.ModuleName, expectedCoins, &vestingPeriod, gomock.Any()).
 		Return(fmt.Errorf("invalid request"))
 
-	err := k.PayParticipantFromModule(ctx, participantAddrStr, amount, types.TopRewardPoolAccName, "vesting-error-test", &vestingPeriod)
+	err := k.PayParticipantFromModule(ctx, participantAddrStr, amount, types.ModuleName, "vesting-error-test", &vestingPeriod)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid request")
 }

@@ -42,11 +42,11 @@ func RegisterLazySessionRoutes(g *echo.Group, resolver SessionResolver, payloadH
 	g.POST("/sessions/:id/gossip/txs", withSessionAuth(resolver, false,
 		func(srv *transport.Server) echo.HandlerFunc { return srv.HandleGossipTxs }))
 
-	g.GET("/sessions/:id/diffs", withSession(resolver,
+	g.GET("/sessions/:id/diffs", withSessionAuth(resolver, false,
 		func(srv *transport.Server) echo.HandlerFunc { return srv.HandleGetDiffs }))
-	g.GET("/sessions/:id/mempool", withSession(resolver,
+	g.GET("/sessions/:id/mempool", withSessionAuth(resolver, false,
 		func(srv *transport.Server) echo.HandlerFunc { return srv.HandleGetMempool }))
-	g.GET("/sessions/:id/signatures", withSession(resolver,
+	g.GET("/sessions/:id/signatures", withSessionAuth(resolver, false,
 		func(srv *transport.Server) echo.HandlerFunc { return srv.HandleGetSignatures }))
 
 	if payloadHandler != nil {
@@ -59,21 +59,6 @@ func RegisterLazySessionRoutes(g *echo.Group, resolver SessionResolver, payloadH
 			observability.IncSessionResolution(routeLabel(c), observability.MetricStatusOK, observability.ReasonOK)
 			return payloadHandler.HandlePayloads(c, srv)
 		})
-	}
-}
-
-func withSession(
-	resolver SessionResolver,
-	pick func(*transport.Server) echo.HandlerFunc,
-) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		srv, err := resolver.SessionServer(c.Param("id"))
-		if err != nil {
-			recordSessionResolution(c, err, false)
-			return sessionHTTPError(c, err)
-		}
-		observability.IncSessionResolution(routeLabel(c), observability.MetricStatusOK, observability.ReasonOK)
-		return pick(srv)(c)
 	}
 }
 

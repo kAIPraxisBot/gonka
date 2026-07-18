@@ -7,7 +7,9 @@ import (
 	"decentralized-api/internal/server/middleware"
 	"decentralized-api/observability"
 	"decentralized-api/poc/artifacts"
+	"log"
 	"net/http"
+	"os"
 	"sort"
 
 	devshardobservability "devshard/observability"
@@ -40,12 +42,19 @@ func WithConfigManager(cm *apiconfig.ConfigManager) ServerOption {
 	}
 }
 
+const mlAPITokenEnv = "ML_API_TOKEN"
+
 func NewServer(recorder cosmos_client.CosmosMessageClient, broker *broker.Broker, opts ...ServerOption) *Server {
 	e := echo.New()
 
 	e.HTTPErrorHandler = middleware.TransparentErrorHandler
 
 	e.Use(middleware.LoggingMiddleware)
+	if token := os.Getenv(mlAPITokenEnv); token != "" {
+		e.Use(middleware.BearerAuth(token))
+	} else {
+		log.Printf("SECURITY WARNING: ML callback API has no authentication (%s unset) — it must be reachable only on a trusted private network", mlAPITokenEnv)
+	}
 
 	s := &Server{
 		e:        e,

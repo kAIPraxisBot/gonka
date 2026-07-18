@@ -977,6 +977,52 @@ func TestSessionServer_StartsRegisteredHost(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+// TestSessionGetRoutesRequireAuth guards the production wiring: the session
+// read routes (diffs/mempool/signatures) must run AuthMiddleware, so an
+// unsigned GET against a fully-resolved session is rejected, not served.
+func TestSessionGetRoutesRequireAuth(t *testing.T) {
+	store := newManagerTestStore(t)
+	hosts := make([]*signing.Secp256k1Signer, 3)
+	for i := range hosts {
+		hosts[i] = mustGenerateKey(t)
+	}
+	user := mustGenerateKey(t)
+	addresses := make([]string, len(hosts))
+	for i, h := range hosts {
+		addresses[i] = h.Address()
+	}
+	br := &mockBridge{
+		escrow: &bridge.EscrowInfo{
+			EscrowID:       "escrow-auth",
+			EpochID:        7,
+			Amount:         100000,
+			CreatorAddress: user.Address(),
+			Slots:          addresses,
+		},
+	}
+	mgr := NewHostManager(store, hosts[0], stub.NewInferenceEngine(), stub.NewValidationEngine(), runtimeTestVersion, br, nil, nil)
+	mgr.SetReady()
+
+	// Pre-resolve so the 401 comes from auth, not from session resolution.
+	srv, err := mgr.SessionServer("escrow-auth")
+	require.NoError(t, err)
+	t.Cleanup(srv.Host().Close)
+
+	e := echo.New()
+	mgr.Register(e.Group(statsTestRoutePrefix))
+	for _, path := range []string{
+		"/sessions/escrow-auth/mempool",
+		"/sessions/escrow-auth/diffs?from=1&to=1",
+		"/sessions/escrow-auth/signatures?nonce=1",
+	} {
+		req := httptest.NewRequest(http.MethodGet, statsTestRoutePrefix+path, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code,
+			"unsigned GET %s must be rejected, got %d body=%s", path, rec.Code, rec.Body.String())
+	}
+}
+
 func TestSessionServer_FailedCreateDoesNotStartHost(t *testing.T) {
 	base := newManagerTestStore(t)
 	store := &failingCreateStore{Storage: base, err: storage.ErrEpochPruned}

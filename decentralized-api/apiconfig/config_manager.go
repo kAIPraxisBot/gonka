@@ -103,11 +103,7 @@ func LoadConfigManagerWithPaths(configPath, sqlitePath, nodeConfigPath string) (
 
 	// Log the resulting config in pretty JSON format for easier debugging
 	// Make a copy and sanitize sensitive fields before logging
-	sanitized := manager.currentConfig
-	sanitized.CurrentSeed.Seed = 0
-	sanitized.PreviousSeed.Seed = 0
-	sanitized.UpcomingSeed.Seed = 0
-	sanitized.MLNodeKeyConfig.WorkerPrivateKey = ""
+	sanitized := sanitizeConfig(manager.currentConfig)
 	if cfgBytes, err := json.MarshalIndent(sanitized, "", "  "); err != nil {
 		log.Printf("Error marshaling final config to JSON: %+v", err)
 	} else {
@@ -206,6 +202,25 @@ func (cm *ConfigManager) GetConfig() Config {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	return cm.currentConfig
+}
+
+// sanitizeConfig clears secret fields (worker private key, PoC seeds) from a
+// COPY. Config's secret fields are value types, so the passed-by-value copy owns
+// them and clearing does not touch the caller's config. KeyringPassword is
+// already json:"-" so it never serializes.
+func sanitizeConfig(cfg Config) Config {
+	cfg.CurrentSeed.Seed = 0
+	cfg.PreviousSeed.Seed = 0
+	cfg.UpcomingSeed.Seed = 0
+	cfg.MLNodeKeyConfig.WorkerPrivateKey = ""
+	return cfg
+}
+
+// SanitizedConfig returns the current config with secrets stripped — safe to log
+// or expose over the admin API. Previously the admin /config endpoint served the
+// raw config, leaking MLNodeKeyConfig.WorkerPrivateKey (json:"worker_private").
+func (cm *ConfigManager) SanitizedConfig() Config {
+	return sanitizeConfig(cm.GetConfig())
 }
 
 func (cm *ConfigManager) GetUpgradePlan() UpgradePlan {

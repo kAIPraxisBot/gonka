@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"devshard/nodemanager/gen"
 
@@ -31,10 +32,27 @@ type Client struct {
 	client gen.NodeManagerClient
 }
 
+// bearerPerRPC attaches "authorization: Bearer <token>" to every RPC. It permits
+// the insecure (plaintext) transport used on the trusted internal network — the
+// token is the access control, transport secrecy is provided at the network layer.
+type bearerPerRPC struct{ token string }
+
+func (b bearerPerRPC) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+
+func (b bearerPerRPC) RequireTransportSecurity() bool { return false }
+
 // NewClient dials node-manager at addr and returns a Client.
-// The connection uses insecure credentials — TLS is terminated at the network layer.
+// The connection uses insecure credentials — TLS is terminated at the network
+// layer. When NODE_MANAGER_API_TOKEN is set, every RPC carries a bearer token so
+// the server-side interceptor accepts it (both sides read the same env var).
 func NewClient(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if token := os.Getenv("NODE_MANAGER_API_TOKEN"); token != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(bearerPerRPC{token: token}))
+	}
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("nodemanager: dial %s: %w", addr, err)
 	}

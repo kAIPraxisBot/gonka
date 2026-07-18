@@ -53,21 +53,3 @@ type ModelsListResponse struct {
 	Object string            `json:"object"`
 	Data   []ModelDescriptor `json:"data"`
 }
-
-type CompletionsRequest struct {
-	Model            string        `json:"model"`
-	Prompt           StringOrArray `json:"prompt"`
-	MaxTokens        *int32        `json:"max_tokens,omitempty"`
-	Temperature      *float32      `json:"temperature,omitempty"`
-	TopP             *float32      `json:"top_p,omitempty"`
-	TopK             *int32        `json:"top_k,omitempty"`
-	FrequencyPenalty *float32      `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float32      `json:"presence_penalty,omitempty"`
-	Stream           bool          `json:"stream,omitempty"`
-	Stop             StringOrArray `json:"stop,omitempty"`
-	Seed             *int32        `json:"seed,omitempty"`
-	Logprobs         *int32        `json:"logprobs,omitempty"`
-	Echo             bool          `json:"echo,omitempty"`
-	Suffix           string        `json:"suffix,omitempty"`
-	BestOf           *int32        `json:"best_of,omitempty"`
-}

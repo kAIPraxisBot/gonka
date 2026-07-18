@@ -539,17 +539,22 @@ func (l *ParticipantRequestLimiter) ObserveResultWithBodyForModel(participantKey
 	if quarantineFor == 0 {
 		return
 	}
+	reason := participantHTTPQuarantineReason(path, statusCode, body)
 
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.applyQuarantineLocked(participantKey, modelID, now.Add(quarantineFor), now, participantQuarantineProbe)
-	l.recordQuarantineTransition(participantKey, modelID, participantQuarantineProbe.String(), participantHTTPQuarantineReason(path, statusCode, body))
-
-	log.Printf("participant_limit_activated participant_key=%s status=%d path_kind=%s",
-		participantKey, statusCode, participantPathKind(path))
-
-	l.persistThrottledStateLocked(participantKey, l.participants[participantKey], statusCode)
+	strikes, quarantined, skipped := l.registerFailureStrikeLocked(participantKey, modelID, now, quarantineFor, participantQuarantineProbe, reason, statusCode)
+	if skipped {
+		return
+	}
+	if quarantined {
+		log.Printf("participant_limit_activated participant_key=%s status=%d path_kind=%s strikes=%d threshold=%d",
+			participantKey, statusCode, participantPathKind(path), strikes, l.failureStrikeThreshold)
+		return
+	}
+	log.Printf("participant_limit_http_streak participant_key=%s status=%d path_kind=%s strikes=%d threshold=%d",
+		participantKey, statusCode, participantPathKind(path), strikes, l.failureStrikeThreshold)
 }
 
 // ObserveTransportFailure records that a request to this host never received an
@@ -577,37 +582,23 @@ func (l *ParticipantRequestLimiter) ObserveTransportFailureForModel(participantK
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// EOF and other transport failures both debounce through the shared strike
+	// gate; they differ only in the audit label/status they record.
+	reason, status, logKind := "transport_failure_quarantine", participantStatusTransport, "transport"
 	if isEOFTransportFailure(err) {
-		state := l.ensureStateLocked(participantKey, now)
-		l.clearExpiredQuarantineIfAnyLocked(participantKey, state, now)
-		state, ok := l.participants[participantKey]
-		if !ok {
-			state = l.ensureStateLocked(participantKey, now)
-		}
-		if l.inQuarantineLocked(state, now) {
-			return
-		}
-		l.addModelLocked(state, modelID)
-		state.failureStrikes++
-		if state.failureStrikes >= l.failureStrikeThreshold {
-			l.applyQuarantineLocked(participantKey, modelID, now.Add(l.transportFailureQuarantine), now, participantQuarantineProbe)
-			l.recordQuarantineTransition(participantKey, modelID, participantQuarantineProbe.String(), "eof_transport_quarantine")
-			log.Printf("participant_limit_eof_transport_quarantine participant_key=%s model_id=%q reason=eof_transport strikes=%d threshold=%d quarantine_mode=%s error=%q",
-				participantKey, normalizeModelID(modelID), state.failureStrikes, l.failureStrikeThreshold, participantQuarantineProbe.String(), truncateError(err))
-			l.persistThrottledStateLocked(participantKey, state, participantStatusEOFTransport)
-			return
-		}
-		log.Printf("participant_limit_eof_transport_streak participant_key=%s model_id=%q reason=eof_transport strikes=%d threshold=%d error=%q",
-			participantKey, normalizeModelID(modelID), state.failureStrikes, l.failureStrikeThreshold, truncateError(err))
-		l.persistThrottledStateLocked(participantKey, state, participantStatusEOFTransport)
+		reason, status, logKind = "eof_transport_quarantine", participantStatusEOFTransport, "eof_transport"
+	}
+	strikes, quarantined, skipped := l.registerFailureStrikeLocked(participantKey, modelID, now, l.transportFailureQuarantine, participantQuarantineProbe, reason, status)
+	if skipped {
 		return
 	}
-
-	l.applyQuarantineLocked(participantKey, modelID, now.Add(l.transportFailureQuarantine), now, participantQuarantineProbe)
-	l.recordQuarantineTransition(participantKey, modelID, participantQuarantineProbe.String(), "transport_failure_quarantine")
-	log.Printf("participant_limit_transport_failure participant_key=%s path_kind=%s error=%q",
-		participantKey, kind, truncateError(err))
-	l.persistThrottledStateLocked(participantKey, l.participants[participantKey], participantStatusTransport)
+	if quarantined {
+		log.Printf("participant_limit_%s_quarantine participant_key=%s model_id=%q path_kind=%s strikes=%d threshold=%d quarantine_mode=%s error=%q",
+			logKind, participantKey, normalizeModelID(modelID), kind, strikes, l.failureStrikeThreshold, participantQuarantineProbe.String(), truncateError(err))
+		return
+	}
+	log.Printf("participant_limit_%s_streak participant_key=%s model_id=%q path_kind=%s strikes=%d threshold=%d error=%q",
+		logKind, participantKey, normalizeModelID(modelID), kind, strikes, l.failureStrikeThreshold, truncateError(err))
 }
 
 func isEOFTransportFailure(err error) bool {
@@ -646,28 +637,17 @@ func (l *ParticipantRequestLimiter) ObserveEmptyStreamForModel(participantKey, m
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	state := l.ensureStateLocked(participantKey, now)
-	l.clearExpiredQuarantineIfAnyLocked(participantKey, state, now)
-	state, ok := l.participants[participantKey]
-	if !ok {
-		state = l.ensureStateLocked(participantKey, now)
-	}
-	if l.inQuarantineLocked(state, now) {
+	strikes, quarantined, skipped := l.registerFailureStrikeLocked(participantKey, modelID, now, l.emptyStreamQuarantine, participantQuarantineShadow, "empty_stream_quarantine", participantStatusEmptyStream)
+	if skipped {
 		return
 	}
-	l.addModelLocked(state, modelID)
-	state.failureStrikes++
-	if state.failureStrikes >= l.failureStrikeThreshold {
-		l.applyQuarantineLocked(participantKey, modelID, now.Add(l.emptyStreamQuarantine), now, participantQuarantineShadow)
-		l.recordQuarantineTransition(participantKey, modelID, participantQuarantineShadow.String(), "empty_stream_quarantine")
+	if quarantined {
 		log.Printf("participant_limit_empty_stream_quarantine participant_key=%s model_id=%q reason=empty_stream strikes=%d threshold=%d quarantine_mode=%s",
-			participantKey, normalizeModelID(modelID), state.failureStrikes, l.failureStrikeThreshold, participantQuarantineShadow.String())
-		l.persistThrottledStateLocked(participantKey, state, participantStatusEmptyStream)
+			participantKey, normalizeModelID(modelID), strikes, l.failureStrikeThreshold, participantQuarantineShadow.String())
 		return
 	}
 	log.Printf("participant_limit_empty_stream_streak participant_key=%s model_id=%q reason=empty_stream strikes=%d threshold=%d",
-		participantKey, normalizeModelID(modelID), state.failureStrikes, l.failureStrikeThreshold)
-	l.persistThrottledStateLocked(participantKey, state, participantStatusEmptyStream)
+		participantKey, normalizeModelID(modelID), strikes, l.failureStrikeThreshold)
 }
 
 // ObserveStalledWinner records a host that won the race, emitted some content,
@@ -1180,6 +1160,63 @@ func (l *ParticipantRequestLimiter) inShadowQuarantineLocked(state *participantR
 
 func (l *ParticipantRequestLimiter) probationActiveLocked(state *participantRequestState) bool {
 	return state != nil && state.failureStrikes > 0 && state.quarantineUntil.IsZero()
+}
+
+// quarantineModeSeverity ranks quarantine modes so the more aggressive one
+// wins when a host's condition worsens: probe (no traffic) outranks shadow
+// (still receives traffic, answers discarded).
+func quarantineModeSeverity(mode participantQuarantineMode) int {
+	if mode == participantQuarantineProbe {
+		return 2
+	}
+	return 1
+}
+
+// registerFailureStrikeLocked records one transient inference failure for a
+// participant and quarantines it only once failures reach the strike
+// threshold. Every transient failure class — dropped connection, empty stream,
+// HTTP throttle/4xx — funnels through this one gate so a lone blip (a 503 while
+// a model warms up, a momentary 429, one reset connection) no longer exiles an
+// otherwise-live host for 30-60 minutes. The quarantine takes the mode of the
+// tripping strike (the host's most-recent signal); a more severe failure that
+// arrives during an active traffic-receiving shadow window escalates it to
+// probe immediately. It returns the post-increment strike count, whether this
+// strike tripped (or escalated) quarantine, and whether the strike was dropped
+// because the host was already quarantined at an equal-or-higher severity.
+func (l *ParticipantRequestLimiter) registerFailureStrikeLocked(participantKey, modelID string, now time.Time, quarantineFor time.Duration, mode participantQuarantineMode, reason string, status int) (strikes int, quarantined bool, skipped bool) {
+	state := l.ensureStateLocked(participantKey, now)
+	l.clearExpiredQuarantineIfAnyLocked(participantKey, state, now)
+	state, ok := l.participants[participantKey]
+	if !ok {
+		state = l.ensureStateLocked(participantKey, now)
+	}
+	if l.inQuarantineLocked(state, now) {
+		// Escalate only when this failure is more severe than the active mode
+		// (probe > shadow): a host that starts hard-failing during a shadow
+		// window is pulled from rotation now instead of at window expiry.
+		if quarantineModeSeverity(mode) > quarantineModeSeverity(state.quarantineMode) {
+			end := state.quarantineUntil
+			if candidate := now.Add(quarantineFor); candidate.After(end) {
+				end = candidate
+			}
+			l.applyQuarantineLocked(participantKey, modelID, end, now, mode)
+			state.quarantineMode = mode // force escalation even when not extending
+			l.recordQuarantineTransition(participantKey, modelID, mode.String(), reason)
+			l.persistThrottledStateLocked(participantKey, state, status)
+			return state.failureStrikes, true, false
+		}
+		return state.failureStrikes, false, true
+	}
+	l.addModelLocked(state, modelID)
+	state.failureStrikes++
+	if state.failureStrikes >= l.failureStrikeThreshold {
+		l.applyQuarantineLocked(participantKey, modelID, now.Add(quarantineFor), now, mode)
+		l.recordQuarantineTransition(participantKey, modelID, mode.String(), reason)
+		l.persistThrottledStateLocked(participantKey, state, status)
+		return state.failureStrikes, true, false
+	}
+	l.persistThrottledStateLocked(participantKey, state, status)
+	return state.failureStrikes, false, false
 }
 
 func (l *ParticipantRequestLimiter) applyQuarantineLocked(participantKey, modelID string, end time.Time, now time.Time, mode participantQuarantineMode) {

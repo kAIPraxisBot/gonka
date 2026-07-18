@@ -17,7 +17,6 @@ const (
 	// TransientStoreKey defines the transient store key
 	TransientStoreKey = "transient_inference"
 
-	TopRewardPoolAccName     = "top_reward"
 	PreProgrammedSaleAccName = "pre_programmed_sale"
 	BridgeEscrowAccName      = "bridge_escrow"
 )
@@ -40,7 +39,6 @@ var (
 	EpochGroupValidationsPrefix       = collections.NewPrefix(13)
 	InferencesPrefix                  = collections.NewPrefix(14)
 	SettleAmountPrefix                = collections.NewPrefix(15)
-	TopMinerPrefix                    = collections.NewPrefix(16)
 	PartialUpgradePrefix              = collections.NewPrefix(17)
 	EpochPerformanceSummaryPrefix     = collections.NewPrefix(18)
 	TrainingExecAllowListPrefix       = collections.NewPrefix(19)
@@ -122,9 +120,9 @@ var (
 	// Index of currently-scheduled maintenance reservations (key = reservationID).
 	// Lets concurrency / schedulability queries iterate only the bounded set
 	// of scheduled reservations instead of every participant's MaintenanceState.
-	MaintenanceScheduledIndexPrefix = collections.NewPrefix(105)
-	ClaimRecipientsPrefix           = collections.NewPrefix(106)
-	ClaimRecipientsByEpochPrefix    = collections.NewPrefix(107)
+	MaintenanceScheduledIndexPrefix        = collections.NewPrefix(105)
+	ClaimRecipientsPrefix                  = collections.NewPrefix(106)
+	ClaimRecipientsByEpochPrefix           = collections.NewPrefix(107)
 	DelegationRewardTransferSnapshotPrefix = collections.NewPrefix(108)
 	ParamsKey                              = []byte("p_inference")
 )

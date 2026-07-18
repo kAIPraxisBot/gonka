@@ -114,8 +114,8 @@ func (s *Server) Register(g *echo.Group) {
 	g.POST("/sessions/:id/challenge-receipt", s.HandleChallengeReceipt)
 	g.POST("/sessions/:id/gossip/nonce", s.HandleGossipNonce)
 	g.POST("/sessions/:id/gossip/txs", s.HandleGossipTxs)
-	// TODO: GET endpoints are intentionally unauthenticated for now.
-	// Before production, restrict these to group members or add read-only auth.
+	// GET endpoints authenticate via AuthMiddleware too: peers sign a canonical
+	// method/path/query string (getSignatureBody) and must be allowed senders.
 	g.GET("/sessions/:id/diffs", s.HandleGetDiffs)
 	g.GET("/sessions/:id/mempool", s.HandleGetMempool)
 	g.GET("/sessions/:id/signatures", s.HandleGetSignatures)
@@ -214,10 +214,7 @@ func (s *Server) isGroupMember(addr string) bool {
 // GET requests skip auth intentionally for now.
 func (s *Server) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		if c.Request().Method == http.MethodGet {
-			// GET endpoints skip auth for now -- see Register comment.
-			return next(c)
-		}
+		isGet := c.Request().Method == http.MethodGet
 
 		sigHex := c.Request().Header.Get(HeaderSignature)
 		tsStr := c.Request().Header.Get(HeaderTimestamp)
@@ -235,18 +232,23 @@ func (s *Server) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			return echo.NewHTTPError(http.StatusUnauthorized, "invalid timestamp")
 		}
 
-		// Cap body size before reading.
-		if s.maxBodySize > 0 {
-			c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, s.maxBodySize)
-		}
-
-		body, err := io.ReadAll(c.Request().Body)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "read body")
+		// GET requests carry no body, so sign a canonical method/path/query
+		// string instead; POST requests sign the (size-capped) body itself.
+		var signed []byte
+		if isGet {
+			signed = getSignatureBody(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery)
+		} else {
+			if s.maxBodySize > 0 {
+				c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, s.maxBodySize)
+			}
+			signed, err = io.ReadAll(c.Request().Body)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, "read body")
+			}
 		}
 
 		now := time.Now().Unix()
-		addr, err := VerifyRequest(s.verifier, s.host.EscrowID(), body, sig, ts, now)
+		addr, err := VerifyRequest(s.verifier, s.host.EscrowID(), signed, sig, ts, now)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusUnauthorized, err.Error())
 		}
@@ -255,9 +257,11 @@ func (s *Server) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			return echo.NewHTTPError(http.StatusForbidden, "sender not in group")
 		}
 
-		// Store sender and re-inject body for handler.
 		c.Set(contextKeySender, addr)
-		c.Set("body", body)
+		if !isGet {
+			// Re-inject the consumed body for the handler.
+			c.Set("body", signed)
+		}
 		return next(c)
 	}
 }

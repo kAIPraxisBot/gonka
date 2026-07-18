@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"log"
+	"os"
+
 	"decentralized-api/apiconfig"
 	"decentralized-api/broker"
 	cosmos_client "decentralized-api/cosmosclient"
@@ -8,8 +11,6 @@ import (
 	pserver "decentralized-api/internal/server/public"
 	"decentralized-api/internal/validation"
 	"decentralized-api/payloadstorage"
-	"net/http"
-	_ "net/http/pprof"
 
 	"cosmossdk.io/x/feegrant"
 	upgradetypes "cosmossdk.io/x/upgrade/types"
@@ -38,6 +39,8 @@ type Server struct {
 	payloadStorage payloadstorage.PayloadStorage
 }
 
+const adminAPITokenEnv = "ADMIN_API_TOKEN"
+
 func NewServer(
 	recorder cosmos_client.CosmosMessageClient,
 	nodeBroker *broker.Broker,
@@ -61,7 +64,11 @@ func NewServer(
 	}
 
 	e.Use(middleware.LoggingMiddleware)
-	e.Any("/debug/pprof/*", echo.WrapHandler(http.DefaultServeMux))
+	if token := os.Getenv(adminAPITokenEnv); token != "" {
+		e.Use(middleware.BearerAuth(token))
+	} else {
+		log.Printf("SECURITY WARNING: admin API has no authentication (%s unset) — it must be reachable only on a trusted private network", adminAPITokenEnv)
+	}
 	g := e.Group("/admin/v1/")
 
 	g.POST("nodes", s.createNewNode)
@@ -86,7 +93,7 @@ func NewServer(
 	// Export DB state (human-readable JSON) for admin purposes
 	g.GET("export/db", s.exportDb)
 
-	// Return current unsanitized config as JSON
+	// Return current config as JSON (secrets stripped via SanitizedConfig)
 	g.GET("config", s.getConfig)
 
 	// Manual validation recovery and claim endpoint
@@ -124,8 +131,10 @@ func (s *Server) Start(addr string) {
 	go s.e.Start(addr)
 }
 
-// getConfig returns the current configuration as JSON (unsanitized)
+// getConfig returns the current configuration as JSON with secrets stripped.
 func (s *Server) getConfig(c echo.Context) error {
-	cfg := s.configManager.GetConfig()
+	// SanitizedConfig strips secrets (worker private key, PoC seeds); the raw
+	// GetConfig would leak MLNodeKeyConfig.WorkerPrivateKey over this endpoint.
+	cfg := s.configManager.SanitizedConfig()
 	return c.JSONPretty(200, cfg, "  ")
 }
