@@ -13,9 +13,9 @@ import (
 // Proto-serialized fields travel as base64 to preserve signature integrity.
 type DiffJSON struct {
 	Nonce         uint64 `json:"nonce"`
-	Txs           []byte `json:"txs"`                        // proto bytes of DiffContent.Txs wrapper
-	UserSig       []byte `json:"user_sig"`                   // raw sig bytes
-	PostStateRoot []byte `json:"post_state_root,omitempty"`  // state root after applying txs
+	Txs           []byte `json:"txs"`                       // proto bytes of DiffContent.Txs wrapper
+	UserSig       []byte `json:"user_sig"`                  // raw sig bytes
+	PostStateRoot []byte `json:"post_state_root,omitempty"` // state root after applying txs
 }
 
 // PayloadJSON is the JSON wire format for inference payload.
@@ -25,6 +25,9 @@ type PayloadJSON struct {
 	InputLength uint64 `json:"input_length"`
 	MaxTokens   uint64 `json:"max_tokens"`
 	StartedAt   int64  `json:"started_at"`
+	// SessionID is an opt-in client session id (KV-cache affinity + cache_salt
+	// isolation). Not part of the signed inference identity.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // InferenceRequest is the JSON body for POST /sessions/:id/chat/completions.
@@ -248,6 +251,7 @@ func PayloadToJSON(p *host.InferencePayload) *PayloadJSON {
 		InputLength: p.InputLength,
 		MaxTokens:   p.MaxTokens,
 		StartedAt:   p.StartedAt,
+		SessionID:   p.SessionID,
 	}
 }
 
@@ -262,6 +266,7 @@ func PayloadFromJSON(pj *PayloadJSON) *host.InferencePayload {
 		InputLength: pj.InputLength,
 		MaxTokens:   pj.MaxTokens,
 		StartedAt:   pj.StartedAt,
+		SessionID:   pj.SessionID,
 	}
 }
 

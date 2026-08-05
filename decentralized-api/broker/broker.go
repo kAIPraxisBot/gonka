@@ -132,6 +132,7 @@ type Broker struct {
 	configManager        *apiconfig.ConfigManager
 	lockMap              map[string]lockEntry
 	lockMapMu            sync.Mutex
+	sessionAffinity      *nodeSessionAffinity // session -> mlnode stickiness (KV-cache reuse)
 }
 
 type lockEntry struct {
@@ -326,6 +327,7 @@ func NewBroker(chainBridge BrokerChainBridge, phaseTracker *chainphase.ChainPhas
 		statusQueryTrigger:   make(chan statusQuerySignal, 1),
 		configManager:        configManager,
 		lockMap:              make(map[string]lockEntry),
+		sessionAffinity:      newNodeSessionAffinity(nodeAffinityConfigFromEnv()),
 	}
 
 	// Initialize NodeWorkGroup
@@ -470,6 +472,7 @@ func (b *Broker) lockAvailableNode(command LockAvailableNode) {
 		b.mu.Lock()
 		leastBusyNode.State.LockCount++
 		b.mu.Unlock()
+		b.sessionAffinity.record(command.SessionID, leastBusyNode.Node.Id)
 	}
 	logging.Debug("Locked node", types.Nodes, "node", leastBusyNode)
 	if leastBusyNode == nil {
@@ -493,6 +496,17 @@ func (b *Broker) getLeastBusyNode(command LockAvailableNode) *NodeWithState {
 	for _, id := range command.SkipNodeIDs {
 		if id != "" {
 			skip[id] = struct{}{}
+		}
+	}
+
+	// Prefer this session's sticky mlnode (warm KV cache) when usable.
+	if stickyID, ok := b.sessionAffinity.pick(command.SessionID); ok {
+		if _, skipped := skip[stickyID]; !skipped {
+			if node, exists := b.nodes[stickyID]; exists {
+				if available, _ := b.nodeAvailable(node, command.Model, epochState.LatestEpoch.EpochIndex, epochState.CurrentPhase); available {
+					return node
+				}
+			}
 		}
 	}
 

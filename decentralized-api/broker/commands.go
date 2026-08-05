@@ -15,6 +15,7 @@ type LockAvailableNode struct {
 	Model       string
 	Response    chan *Node
 	SkipNodeIDs []string
+	SessionID   string // optional: prefer this session's sticky mlnode (KV-cache reuse)
 }
 
 func (g LockAvailableNode) GetResponseChannelCapacity() int {

@@ -21,7 +21,7 @@ type mockBroker struct {
 	getNodesFunc func() ([]broker.NodeResponse, error)
 }
 
-func (m *mockBroker) AcquireMLNode(ctx context.Context, model string, skipNodeIDs []string) (string, string, string, error) {
+func (m *mockBroker) AcquireMLNode(ctx context.Context, model string, skipNodeIDs []string, sessionID string) (string, string, string, error) {
 	return m.acquireFunc(ctx, model, skipNodeIDs)
 }
 func (m *mockBroker) ReleaseMLNode(lockID string, outcome broker.InferenceResult) error {

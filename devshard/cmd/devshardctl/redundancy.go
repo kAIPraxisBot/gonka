@@ -575,6 +575,7 @@ type Redundancy struct {
 	balanceExhaustedOnce sync.Once
 	picker               *sessionPicker
 	participantLimiter   *ParticipantRequestLimiter
+	affinity             *affinityTracker // session->host stickiness for KV-cache reuse (affinity.go); nil/off => round-robin
 	stateBlockMu         sync.RWMutex
 	stateBlockedHosts    map[string]string // escrow-local participant blocks for non-recoverable state divergence
 
@@ -861,9 +862,9 @@ type inflight struct {
 	role        string
 	startReason string
 
-	receiptOnce      sync.Once
-	receiptTimeNano  atomic.Int64 // unix nano; 0 means not received
-	receiptCh        chan struct{} // closed when receipt arrives
+	receiptOnce     sync.Once
+	receiptTimeNano atomic.Int64  // unix nano; 0 means not received
+	receiptCh       chan struct{} // closed when receipt arrives
 
 	tokenOnce       sync.Once
 	firstTokenNano  atomic.Int64 // unix nano; 0 means no content yet
@@ -1195,7 +1196,6 @@ func (rg *raceGroup) promoteFallbackWinner(inf *inflight) error {
 	return nil
 }
 
-
 func (rg *raceGroup) addWinnerHoldCandidate(inf *inflight) {
 	if rg == nil || inf == nil || PairwiseWinnerHold <= 0 {
 		return
@@ -1518,7 +1518,6 @@ func (inf *inflight) releaseClassifyPartial() {
 	inf.classifyPartial = nil
 }
 
-
 // raceWriter is an io.Writer that only forwards writes from the winning nonce.
 type raceWriter struct {
 	group *raceGroup
@@ -1717,7 +1716,7 @@ func (e *Redundancy) RunInference(ctx context.Context, params user.InferencePara
 	// awaitRace in the same goroutine), so no synchronisation needed.
 	triedParticipants := map[string]bool{}
 
-	primary, err := e.prepareInflight(ctx, params, triedParticipants)
+	primary, err := e.preparePrimaryWithAffinity(ctx, params, triedParticipants)
 	if err != nil {
 		logRequestStage(ctx, "runner_prepare_failed", "escrow", e.devshardID, "error", err)
 		if errors.Is(err, types.ErrInsufficientBalance) {
@@ -1868,6 +1867,47 @@ func (e *Redundancy) prepareInflight(ctx context.Context, params user.InferenceP
 		e.recordAccountingAttempt(ctx, inf)
 		return inf, nil
 	}
+}
+
+// preparePrimaryWithAffinity routes a keyed session's primary attempt back to its
+// sticky participant (KV-cache reuse), falling back to natural routing on a miss
+// or hold-timeout. See proposals/kv-cache-affinity/README.md.
+func (e *Redundancy) preparePrimaryWithAffinity(ctx context.Context, params user.InferenceParams, tried map[string]bool) (*inflight, error) {
+	if e.affinity.enabled() && params.AffinityKey != "" {
+		members := e.session.ParticipantKeys()
+		memberSet := make(map[string]bool, len(members))
+		for _, k := range members {
+			memberSet[k] = true
+		}
+		if sticky, ok := e.affinity.Pick(params.AffinityKey, func(p string) bool { return memberSet[p] }); ok {
+			exclude := make(map[string]bool, len(members))
+			for _, k := range members {
+				if k != sticky {
+					exclude[k] = true
+				}
+			}
+			holdCtx, cancel := context.WithTimeout(ctx, e.affinity.cfg.HoldTimeout)
+			inf, err := e.prepareInflight(holdCtx, params, exclude)
+			cancel()
+			if err == nil {
+				e.affinity.Record(params.AffinityKey, e.session.HostParticipantKey(inf.hostIdx))
+				return inf, nil
+			}
+			// A real client cancellation must surface; a mere hold-timeout falls through.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			logRequestStage(ctx, "affinity_fallback_natural", "escrow", e.devshardID, "sticky_participant", sticky, "reason", err)
+		}
+	}
+	inf, err := e.prepareInflight(ctx, params, tried)
+	if err != nil {
+		return nil, err
+	}
+	if e.affinity.enabled() {
+		e.affinity.Record(params.AffinityKey, e.session.HostParticipantKey(inf.hostIdx))
+	}
+	return inf, nil
 }
 
 func (e *Redundancy) startInflight(ctx context.Context, inf *inflight, race *raceGroup, params user.InferenceParams, clientFlag *cancelFlag) {
@@ -3380,7 +3420,6 @@ func isEmptyStreamAttempt(inf *inflight) bool {
 	}
 	return inf.contentChunks.Load() == 0
 }
-
 
 // isModelBurnEmpty: empty stream where the model generated tokens that vLLM
 // stripped (e.g. </think> at small max_tokens). Documented reasoning outcome,

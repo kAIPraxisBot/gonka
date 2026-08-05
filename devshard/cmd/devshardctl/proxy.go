@@ -229,6 +229,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:   req.MaxTokens,
 		StartedAt:   time.Now().Unix(),
 		Stream:      req.Stream,
+		AffinityKey: affinityKeyFromBody(body), // opt-in KV-cache affinity; empty => round-robin
 	}
 	logRequestStage(ctx, "proxy_request_started", "escrow", p.escrowID, "model", model, "stream", req.Stream, "input_tokens", params.InputLength)
 

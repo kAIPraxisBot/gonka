@@ -3,6 +3,9 @@ package inference
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -79,12 +82,15 @@ func NewEngine(
 // falls back to the passive ML-node cache.
 func (e *Engine) Execute(ctx context.Context, req devshard.ExecuteRequest) (*devshard.ExecuteResult, error) {
 	return executeInference(ctx, req, e.payloadStore, e.phase.EpochID(), func(ctx context.Context, model string, body []byte) (*http.Response, error) {
-		return e.executeMLRequest(ctx, model, req.EscrowID, body)
+		return e.executeMLRequest(ctx, model, req.EscrowID, req.SessionID, body)
 	}, e.chainParams)
 }
 
-func (e *Engine) executeMLRequest(ctx context.Context, model, escrowID string, body []byte) (*http.Response, error) {
-	resp, err := e.doWithLockedNode(ctx, observability.PathExecute, model, escrowID, func(endpoint string) (*http.Response, error) {
+func (e *Engine) executeMLRequest(ctx context.Context, model, escrowID, sessionID string, body []byte) (*http.Response, error) {
+	if sessionID != "" {
+		body = withCacheSalt(body, sessionID)
+	}
+	resp, err := e.doWithLockedNode(ctx, observability.PathExecute, model, escrowID, sessionID, func(endpoint string) (*http.Response, error) {
 		url := endpoint + "/v1/chat/completions"
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if reqErr != nil {
@@ -101,6 +107,26 @@ func (e *Engine) executeMLRequest(ctx context.Context, model, escrowID string, b
 	return resp, nil
 }
 
+// withCacheSalt sets vLLM's cache_salt = hash(session id) so a client's KV blocks
+// are isolated from others' (output-invariant; unparseable body passes through).
+func withCacheSalt(body []byte, sessionID string) []byte {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	salt, err := json.Marshal(hex.EncodeToString(sum[:]))
+	if err != nil {
+		return body
+	}
+	obj["cache_salt"] = salt
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // doWithLockedNode tries NodeManager gRPC first. On success it records the
 // node in the passive cache (Observe), POSTs, and Releases. If dapi is
 // unreachable it falls back to mgr.PickNode round-robin without lock/release.
@@ -111,6 +137,7 @@ func (e *Engine) doWithLockedNode(
 	path observability.Path,
 	model string,
 	escrowID string,
+	sessionID string,
 	fn func(endpoint string) (*http.Response, error),
 ) (*http.Response, error) {
 	var excluded []string
@@ -120,7 +147,7 @@ func (e *Engine) doWithLockedNode(
 
 	for attempt := 0; attempt < maxAcquireAttempts; attempt++ {
 		acqCtx, cancel := context.WithTimeout(ctx, acquireTimeout)
-		acq, err := e.mlClient.Acquire(acqCtx, model, excluded, escrowID)
+		acq, err := e.mlClient.Acquire(acqCtx, model, excluded, escrowID, sessionID)
 		cancel()
 
 		if err != nil {

@@ -216,6 +216,10 @@ type InferenceParams struct {
 	ContextTotalHint uint64
 	StartedAt        int64
 	Stream           bool
+	// AffinityKey is an optional gateway-local session id (the client's OpenAI
+	// prompt_cache_key, fallback user) used to steer follow-ups to the same host
+	// for KV-cache reuse. Empty => today's round-robin. See cmd/devshardctl/affinity.go.
+	AffinityKey string
 }
 
 // Session manages the user side of the devshard protocol.
@@ -863,6 +867,7 @@ func (s *Session) SendOnly(ctx context.Context, p *PreparedInference, stream io.
 			InputLength: p.params.InputLength,
 			MaxTokens:   p.params.MaxTokens,
 			StartedAt:   p.params.StartedAt,
+			SessionID:   p.params.AffinityKey,
 		},
 	}, stream, receiptHandler)
 	if err != nil && state.IsPostStateRootMismatchError(err) {

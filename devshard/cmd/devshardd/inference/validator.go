@@ -150,7 +150,9 @@ func evaluateValidationResult(
 }
 
 func (v *Validator) executeMLRequest(ctx context.Context, model, escrowID string, body []byte) (*http.Response, error) {
-	resp, err := v.engine.doWithLockedNode(ctx, observability.PathValidate, model, escrowID, func(endpoint string) (*http.Response, error) {
+	// Validation replays the original prompt with no client session (no affinity,
+	// no cache_salt) so it verifies against the signed prompt exactly.
+	resp, err := v.engine.doWithLockedNode(ctx, observability.PathValidate, model, escrowID, "", func(endpoint string) (*http.Response, error) {
 		url := endpoint + "/v1/chat/completions"
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if reqErr != nil {
