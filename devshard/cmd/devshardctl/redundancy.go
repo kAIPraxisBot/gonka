@@ -2498,6 +2498,32 @@ func (e *Redundancy) waitForPendingLosers(ctx context.Context, winnerNonce uint6
 		return
 	}
 
+	// No winner => the request already concluded as a failure (client gone, or
+	// every attempt timed out / errored). The SecondaryWaitAfterWinner grace
+	// exists to let speculative LOSERS finish *after a winner is crowned* so
+	// their work can be recorded; with no winner there is nothing to preserve.
+	// Holding stalled attempts for the full grace instead pins one monitor +
+	// drain goroutine set per attempt for up to SecondaryWaitAfterWinner (5m by
+	// default), so an escrow whose hosts stall on every request accumulates
+	// goroutines far faster than they drain — a goroutine "leak" under load.
+	// Cancel immediately and drain; SendOnly unwinds on cancel so this returns
+	// promptly and finishRaceOutcome still sees stable inf.resp/inf.err.
+	if winnerNonce == 0 {
+		for _, inf := range pending {
+			logInferenceStage(ctx, inf.escrowID, inf.nonce, "speculative_attempt_canceled",
+				"host", inf.hostID,
+				"reason", "no_winner",
+			)
+			if inf.cancel != nil {
+				inf.cancel()
+			}
+		}
+		for _, inf := range pending {
+			<-inf.done
+		}
+		return
+	}
+
 	timer := time.NewTimer(SecondaryWaitAfterWinner)
 	defer stopTimer(timer)
 
